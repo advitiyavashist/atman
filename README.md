@@ -38,6 +38,7 @@ Then the part that makes it a team instead of a queue:
 2. **A different agent** — never the author — checks that commit and accepts it.
 3. Only then does B open, and B's agent is handed A's accepted commit.
 
+The next ticket opens only after someone else accepts that commit.
 So the next task starts from work someone verified, and a "done" nobody checked
 stops the chain instead of quietly feeding the next agent.
 
@@ -56,13 +57,14 @@ talking to their own providers.
 
 ## One path
 
-Python 3.9+ and Git. Tested on one macOS machine:
+Python 3.9+ and Git. Node/npm are needed for the local app at `/app/`
+(install builds it when they are on PATH). Tested on one macOS machine:
 `git clone` plus `./install.sh`.
 
 ```sh
 git clone https://github.com/advitiyavashist/atman.git
 cd atman
-./install.sh                 # links atm and tickets into ~/.local/bin
+./install.sh                 # links atm/tickets; builds ui/dist when Node is present
 export PATH="$HOME/.local/bin:$PATH"
 atm self                     # which file you are actually running
 ```
@@ -71,6 +73,9 @@ atm self                     # which file you are actually running
 `./install.sh --prefix DIR` places the symlinks in `DIR`; they still run
 `tickets.py` from this checkout. `--force` replaces the existing one on
 purpose. `atm` is the command; `tickets` is a compatibility alias.
+When Node/npm are missing, install prints the one-line UI build
+(`npm install && npm run build -w ui`); `atm ui` never serves a bare 404
+at `/app/` — it shows that same command on the page.
 
 Or Homebrew on macOS, which installs the current tagged release instead of a
 checkout:
@@ -78,7 +83,11 @@ checkout:
 ```sh
 brew tap advitiyavashist/tap
 brew install atman
-atm --version                # tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
+atm --version
+# 0.3.0
+# tickets commit b34d423cac00266a2cc6fc23b94759ee04894f71 (verified release)
+# source: ...
+# pinned release b34d423cac00; newer releases can't be checked from here: brew upgrade atman (or re-run install_live)
 ```
 
 The formula `depends_on "python@3.13"`, so Homebrew installs and uses its own
@@ -257,7 +266,7 @@ Code, Codex and Cursor. This table records what is tested, partial, and
 planned for this preview. Its evidence links point to files and tests in this
 repository.
 
-| Claim | Status on 2026-09-15 | Evidence |
+| Claim | Status on 2026-09-19 | Evidence |
 | --- | --- | --- |
 | Install: `git clone` + `./install.sh` | tested, one macOS machine | `tests/test_live_install.py`; walkthrough above |
 | Install: Homebrew on macOS (`brew tap advitiyavashist/tap && brew install atman`) | published: installs the current release, `v0.3.0`, and brings its own Python 3.13 via `depends_on "python@3.13"` | tap `advitiyavashist/homebrew-tap`, `Formula/atman.rb`; release `v0.3.0` tarball sha256 matches the formula; `packaging/homebrew/atman.rb` |
@@ -290,8 +299,9 @@ Known first-run defects, each with the workaround that was tested:
 - `atm accept` requires a reviewer other than the ticket's author; it does
   not require the master seat. `atm done` on a ticket still in progress
   requires its current owner; once the ticket is in review any seat can close
-  it. It records the commit of the artifact checkout, so use `--artifact` to
-  point it at the accepted worktree when closing elsewhere.
+  it. With an accept present, `atm done` records that accepted commit, not
+  the closer's HEAD; use `--artifact` to point it at the accepted worktree
+  when closing elsewhere.
 - `atm reserve` requires taking master first.
 
 ## Read next
@@ -300,7 +310,7 @@ Known first-run defects, each with the workaround that was tested:
 - [Agent onboarding](docs/onboarding/README.md) and [Master onboarding](docs/onboarding/master-howto.md)
 - [Bring your own agent](docs/byoa.md), [Messages and runners](docs/messages-and-runners.md), [Team knowledge](docs/knowledge/README.md)
 - [Recovery contract](docs/recovery-contract.md)
-- [Contributing](CONTRIBUTING.md), [Community](docs/community.md), [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Contributing](CONTRIBUTING.md), [Community](docs/community.md), [Code of Conduct](CODE_OF_CONDUCT.md), [Security](SECURITY.md)
 
 Operator and historical notes, not a first read: the author's
 [Mac runbook](docs/onboarding/ceo-mac-runbook.md) and the
@@ -308,4 +318,6 @@ Operator and historical notes, not a first read: the author's
 
 [License](LICENSE) (MIT). Fork, branch off `main`, and open a pull request.
 Questions and bug reports go to
-[GitHub issues](https://github.com/advitiyavashist/atman/issues).
+[GitHub issues](https://github.com/advitiyavashist/atman/issues); what belongs
+there is in [SUPPORT.md](SUPPORT.md). A vulnerability goes through
+[SECURITY.md](SECURITY.md) instead, never a public issue.

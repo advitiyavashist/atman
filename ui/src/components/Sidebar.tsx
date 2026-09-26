@@ -10,6 +10,7 @@
  */
 
 import type { Projects } from "../api/types";
+import { projectWorkloadLine } from "../lib/map";
 import { Missing } from "./bits";
 
 export const VIEWS = ["lead", "plan", "needs-you", "fleet", "runs"] as const;
@@ -83,14 +84,14 @@ export function Sidebar({
             </select>
             <ul className="project-list">
               {projects.projects.map((p) => {
-                const open = p.counts.open;
+                const line = projectWorkloadLine(p.counts);
                 return (
                   <li key={p.slug} className={p.slug === project ? "project-current" : ""}>
                     <button type="button" className="btn-quiet" onClick={() => onProject(p.slug)} aria-current={p.slug === project}>
                       {p.slug}
                     </button>
-                    <span className="muted">
-                      {open === undefined ? <Missing what="counts unavailable" /> : `${open} open`}
+                    <span className="muted" data-testid="project-count">
+                      {line ? line : <Missing what="counts unavailable" />}
                     </span>
                     <span className="muted">{p.lead ? `lead ${p.lead}` : "no lead picked"}</span>
                     <span className="muted src">{p.source}</span>

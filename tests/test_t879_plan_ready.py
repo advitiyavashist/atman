@@ -52,6 +52,9 @@ def env_for(tmp_path, agent="alice"):
     (tmp_path / "home").mkdir(exist_ok=True)
     e["TICKET_AGENT"] = agent
     e.pop("TICKETS_DIR", None)
+    e.pop("TICKET_SEAT", None)
+    e.pop("TICKET_SESSION_ID", None)
+    e.pop("CLAUDE_CODE_SESSION_ID", None)
     return e
 
 
@@ -82,7 +85,7 @@ def _ticket_blob(repo, tid):
     return (repo / ".tickets" / ("%s.json" % tid)).read_text()
 
 
-def test_plan_with_fields_is_ready_and_b_nextable_after_a(tmp_path):
+def test_plan_with_fields_is_ready_and_b_not_nextable_after_a_done_without_review(tmp_path):
     repo = boot(tmp_path)
     r = run(repo, "plan", tmp_path=tmp_path, stdin=PLAN_WITH_FIELDS)
     assert r.returncode == 0, r.stderr + r.stdout
@@ -105,13 +108,16 @@ def test_plan_with_fields_is_ready_and_b_nextable_after_a(tmp_path):
     d = run(repo, "done", "T-001", "--notes", "wrote hello.txt", "--force",
             tmp_path=tmp_path, agent="alice")
     assert d.returncode == 0, d.stderr + d.stdout
+    assert "blocked: T-002 -- T-001 marked done without verification" in d.stdout
 
     b = json.loads((repo / ".tickets" / "T-002.json").read_text())
     assert b["lane"] == "ready"
     n2 = run(repo, "next", tmp_path=tmp_path, agent="bob")
-    assert n2.returncode == 0, n2.stderr + n2.stdout
-    assert "T-002" in n2.stdout
+    assert n2.returncode != 0, n2.stdout + n2.stderr
+    assert "T-002" not in n2.stdout
     assert "waiting on unfinished" not in (n2.stdout + n2.stderr).lower()
+    # T-1031: accept-without-review_head records the event but does not
+    # release the dependent. The release path is covered by T-1031.
 
 
 def test_plan_without_fields_stays_capture_with_explicit_hint(tmp_path):
@@ -151,16 +157,20 @@ def test_plan_without_fields_stays_capture_with_explicit_hint(tmp_path):
     d = run(repo, "done", "T-001", "--notes", "wrote hello.txt", "--force",
             tmp_path=tmp_path, agent="alice")
     assert d.returncode == 0, d.stderr + d.stdout
-    assert "T-002 waits in capture: run atm sound T-002" in d.stdout
+    assert "blocked: T-002 -- T-001 marked done without verification" in d.stdout
+    b = json.loads((repo / ".tickets" / "T-002.json").read_text())
+    assert b.get("lane") == "capture"
 
     n2 = run(repo, "next", tmp_path=tmp_path, agent="bob")
     assert n2.returncode != 0
     out2 = n2.stdout + n2.stderr
-    assert "T-002 waits in capture: run atm sound T-002" in out2
+    assert "claimed T-002" not in out2
+    assert "T-002" not in n2.stdout
     assert "waiting on unfinished" not in out2.lower()
 
     g2 = run(repo, "graph", tmp_path=tmp_path)
-    assert "T-002 waits in capture: run atm sound T-002" in g2.stdout
+    assert "lane=capture" in g2.stdout
+    assert "T-002" in g2.stdout
     assert "waiting on T-001" not in g2.stdout
 
 

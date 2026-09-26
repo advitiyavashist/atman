@@ -83,6 +83,39 @@ PRIMARY_CLI_NAME = "atm"
 COMPAT_CLI_NAME = "tickets"
 
 
+def _package_version():
+    """Semver printed as the first line of `atm --version` (T-1080).
+
+    Reads ``ticket_board.__version__`` from the ``src/`` next to this file so
+    the monolith cannot drift from the package (and cannot silently adopt a
+    different site-packages install). Falls back to parsing ``__init__.py``.
+    """
+    root = os.path.dirname(os.path.realpath(__file__))
+    src = os.path.join(root, "src")
+    if os.path.isdir(src) and src not in sys.path:
+        sys.path.insert(0, src)
+    try:
+        import importlib
+        tb = importlib.import_module("ticket_board")
+        ver = getattr(tb, "__version__", None)
+        if ver:
+            return str(ver)
+    except Exception:
+        pass
+    init = os.path.join(src, "ticket_board", "__init__.py")
+    try:
+        with open(init, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+PACKAGE_VERSION = _package_version()
+
+
 def cli_prog(argv=None):
     """argparse/help/error name from how this process was invoked."""
     raw = (argv if argv is not None else sys.argv) or [""]
@@ -289,15 +322,12 @@ PROVIDER_SESSION_ID_VARS = (
 def _supervisor_launch_env(board, owner):
     """Environment for a supervisor-launched watch/spawn/probe child.
 
-    Inherited provider session ids are stripped so the child cannot adopt a
-    parent seat's `.identities/` record or register its ambient transport.
-    TICKET_SEAT is the authoritative assignment; TICKET_SESSION_ID is a fresh
-    launch key bound to `owner`.
+    Inherited provider identity and transport are stripped so the child cannot
+    adopt a parent seat's record or endpoint. TICKET_SEAT is the authoritative
+    assignment; TICKET_SESSION_ID is a fresh launch key bound to `owner`.
+    Explicit attach does not use this path.
     """
-    env = _clean_git_env()
-    sa = _session_adapters()
-    for var in PROVIDER_SESSION_ID_VARS + sa.AMBIENT_TRANSPORT_VARS + (sa.TRANSPORT_BOARD_ENV,):
-        env.pop(var, None)
+    env = _session_boundary().fresh_child_env(_clean_git_env())
     env.pop("TICKET_SEAT", None)
     env.pop("TICKET_AGENT", None)
     sid = "launch:%s:%s" % (owner, hashlib.sha256(os.urandom(16)).hexdigest()[:16])
@@ -1576,7 +1606,7 @@ def drive_status(board, tickets=None):
     idle = []
     for r in load_agents(board):
         who = r.get("owner", "")
-        if not who or r.get("limit") or hours_since(r.get("seen", "")) > 2:
+        if not who or _route_headroom().seat_limit(r) or hours_since(r.get("seen", "")) > 2:
             continue
         holds = any(t.get("owner") == who and t.get("status") in ("claimed", "review") for t in tickets)
         if holds:
@@ -2571,8 +2601,7 @@ def _route_seat_limit(board, name):
     tickets.py also persists an expired reset so later reads see it cleared.
     """
     rec = _agent_rec(board, name) or {}
-    _active_seat_limit(board, name, rec)
-    return _route_headroom().seat_limit(rec)
+    return _active_seat_limit(board, name, rec)
 
 
 def _refuse_limited_seat(board, seat, verb):
@@ -3858,6 +3887,10 @@ def cmd_board(a, board):
     ready = unblocked(board, tickets)
     if ready:
         print("  -> ready to claim: %s" % ", ".join(t["id"] for t in ready))
+    for rec in load_agents(board):
+        warning = _stale_limit_warning(board, rec)
+        if warning:
+            print("  attention: " + warning)
     if not a.quiet:
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
@@ -4737,14 +4770,42 @@ def cmd_accept(a, board):
 
 
 def cmd_reject(a, board):
-    """Record a structured reject bound to the submitted review head (T-944)."""
+    """Record a structured reject and return the ticket to its author (T-944/T-1460).
+
+    API decideReview(reject) already flips state to claimed with the same owner.
+    CLI used to leave status=review, so atm mine stayed empty and the author
+    idled until a coordinator ran reopen+assign. Reject now matches the API.
+    """
     t = load(board, a.id)
+    reviewer = whoami()
     ev, err = _review_verdict().apply(
-        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+        t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
     if err:
         sys.exit(err)
+    author = _review_verdict().return_to_author_for_revision(
+        t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
+        kind="reject")
+    tc = _recovery()
+    if tc is not None and author:
+        harness = ""
+        try:
+            harness = _agent_harness(board, author)[0]
+        except Exception:
+            harness = ""
+        tc.issue_owner_lease(
+            t, author, harness=harness, reason="reject-revision",
+            previous_owner=author)
+        tc.rewrite_claim_lock(board, t["id"], author)
     save(board, t)
-    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
+    if author:
+        _safe(lambda: _bind_agent_ticket(board, author, t["id"]), None)
+        _safe(lambda: post_message(
+            board, reviewer,
+            "%s rejected %s -- revise and resubmit: %s" % (
+                t["id"], ev["sha"][:12], ev.get("reason") or ""),
+            to=author, re=t["id"], task=True, source="review"), None)
+    print("%s rejected %s by %s; returned to %s as claimed for revision" % (
+        a.id, ev["sha"], ev["by"], author or "?"))
 
 
 def _trunk(cwd=None):
@@ -5871,7 +5932,7 @@ def _is_desk_merge_pytest_cmd(cmd):
     with gaps). Live counterexample 10:03Z pid 51475:
     `pytest -q -p no:cacheprovider -x --ignore=.worktrees --ignore=.claude`
     -- contiguous pgrep `pytest -x --ignore=.worktrees` is empty. Never
-    cwd (51475 chdirs into /tmp/pytest-of-kavana mid-run; a cwd==desk-WT
+    cwd (51475 chdirs into /tmp/pytest-of-<user> mid-run; a cwd==desk-WT
     gate reads CLEAR while the suite is still alive). Never the full
     `ps aux` line. QUIET-BOX / T-486 (e) `desk_pytest_alive` /
     `desk_merge_alive` must call `_desk_pytest_alive`, not cwd and not
@@ -5883,27 +5944,49 @@ def _is_desk_merge_pytest_cmd(cmd):
     return "-x" in argv and _argv_has_ignore_worktrees(argv)
 
 
-def _desk_pytest_pids(extra_pids=()):
-    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+def _process_table_snapshot():
+    """All (pid, full_command) rows. Linux /proc is not truncated at COLUMNS=80.
 
-    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
-    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    Returns ``(rows, available)``. ``available`` is False when the table
+    could not be read at all; an empty ``rows`` then means unknown, not idle.
+
+    On Linux, read ``/proc/<pid>/cmdline`` only. Kernel threads have an
+    empty cmdline; a per-pid ``ps -ww -p`` fallback is the pile-up T-604
+    forbids (~one fork per thread, per snapshot). When ``/proc`` is absent,
+    one ``ps -axww`` covers the table.
     """
     import subprocess
 
-    extra = set()
-    for p in extra_pids or ():
+    proc = "/proc"
+    if os.path.isdir(proc):
         try:
-            extra.add(int(p))
-        except (TypeError, ValueError):
-            continue
-    out = [p for p in extra if _pid_alive(p)]
+            names = os.listdir(proc)
+        except OSError:
+            return [], False
+        me = os.getpid()
+        rows = []
+        for name in names:
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == me:
+                continue
+            cmd = _proc_cmdline(pid)
+            if cmd:
+                rows.append((pid, cmd))
+        return rows, True
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,args="],
+            capture_output=True, text=True, env=env,
+        )
     except OSError:
-        return sorted(set(out))
-    me = os.getpid()
+        return [], False
+    if r.returncode != 0:
+        return [], False
+    rows = []
     for line in (r.stdout or "").splitlines():
         line = line.strip()
         if not line:
@@ -5915,11 +5998,33 @@ def _desk_pytest_pids(extra_pids=()):
             pid = int(parts[0])
         except ValueError:
             continue
+        rows.append((pid, parts[1]))
+    return rows, True
+
+
+def _desk_pytest_pids(extra_pids=()):
+    """Pids of desk-merge-shaped pytest processes, plus any still-alive extra.
+
+    Extra pids are the ACCEPT "or the pid" fallback (T-554 waiter also
+    checked `ps -p 51475`). Never filters on cwd. Does not spawn --stop.
+    """
+    extra = set()
+    for p in extra_pids or ():
+        try:
+            extra.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    out = [p for p in extra if _pid_alive(p)]
+    rows, ok = _process_table_snapshot()
+    if not ok:
+        return sorted(set(out))
+    me = os.getpid()
+    for pid, cmd in rows:
         if pid == me:
             continue
         if pid in extra:
             continue
-        if _is_desk_merge_pytest_cmd(parts[1]) and _pid_alive(pid):
+        if _is_desk_merge_pytest_cmd(cmd) and _pid_alive(pid):
             out.append(pid)
     return sorted(set(out))
 
@@ -5974,28 +6079,12 @@ def _parse_watch_table():
     callers that are about to signal or to report absence must say so rather
     than claim the fleet is idle (T-926).
     """
-    import subprocess
-
     out = []
-    try:
-        r = subprocess.run(["ps", "-ax", "-o", "pid=,command="], capture_output=True, text=True)
-    except OSError:
-        return out, False
-    if r.returncode != 0:
+    rows, ok = _process_table_snapshot()
+    if not ok:
         return out, False
     me = os.getpid()
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        cmd = parts[1]
+    for pid, cmd in rows:
         # T-875 (12): installed `tickets`/`atm` shims do not contain tickets.py.
         if pid == me or " watch" not in cmd:
             continue
@@ -6280,8 +6369,10 @@ def _process_command(pid):
     """Full, untruncated command line for pid, or '' if gone/unreadable.
 
     T-875 (12): mere PID existence is not evidence of a watcher -- PIDs get
-    recycled. Callers must read this string. Linux /proc is preferred; macOS
-    `ps -ww` avoids the default ARG_MAX truncation.
+    recycled. Callers must read this string. When ``/proc`` exists, read
+    ``/proc/<pid>/cmdline`` only: an empty cmdline (kernel threads) is
+    ``''``, never a per-pid ``ps`` fork (T-604). Use ``ps -ww`` only when
+    there is no ``/proc`` (macOS).
     """
     import subprocess
 
@@ -6289,22 +6380,25 @@ def _process_command(pid):
         pid = int(pid)
     except (TypeError, ValueError):
         return ""
-    proc_path = "/proc/%d/cmdline" % pid
+    if os.path.isdir("/proc"):
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                raw = f.read()
+        except (OSError, IOError):
+            return ""
+        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    env = os.environ.copy()
+    env["COLUMNS"] = "65535"
     try:
-        with open(proc_path, "rb") as f:
-            raw = f.read()
-        if raw:
-            return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
-    except (OSError, IOError):
-        pass
-    try:
-        r = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
-                           capture_output=True, text=True)
+        r = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, env=env,
+        )
     except (OSError, ValueError):
-        return _proc_cmdline(pid)
+        return ""
     if r.returncode != 0:
-        return _proc_cmdline(pid)
-    return (r.stdout or "").strip() or _proc_cmdline(pid)
+        return ""
+    return (r.stdout or "").strip()
 
 
 def _validated_owned_watch_pid(board, owner):
@@ -6629,7 +6723,7 @@ def _watch_log_state(board, owner):
     # speed dropped it the moment one of those failures happened to take
     # longer than the usual few seconds.
     streak = []
-    expired_at = ((_agent_rec(board, owner) or {}).get("limit_expired_at") or "")
+    expired_at = _seat_limit_expired_at(_agent_rec(board, owner) or {})
     for r in reversed(runs):
         if expired_at and (r["exit_at"] or r["start"]) <= expired_at:
             break
@@ -6799,9 +6893,9 @@ def agent_liveness(board, rec, peers=None):
             # which two we looked for, rather than picking one's error message.
             tdetail = "no Claude or Codex transcript for %s" % _tilde(cwd)
 
-    expired_age = _age_secs(((_agent_rec(board, owner) or {}).get("limit_expired_at")))
+    expired_age = _age_secs(_seat_limit_expired_at(_agent_rec(board, owner) or {}))
     if tstate == "limited" and expired_age is not None and tage is not None and tage >= expired_age:
-        tstate, tdetail = "unknown", "previous provider reset elapsed; awaiting fresh session evidence"
+        tstate, tdetail = "unknown", "previous limit expired; awaiting fresh session evidence"
     if tstate != "unknown":
         out.update(state=tstate, source=tsource, heuristic=False, detail=tdetail)
         # A dead watcher under a quiet transcript is a real dead lane; a dead
@@ -6944,7 +7038,8 @@ def cmd_limit(a, board):
         msg = "%s is back (limit cleared)" % owner
     else:
         limit = {"at": now(), "until": a.until or "", "note": a.note or ""}
-        mutate = lambda rec: rec.update({"limit": limit})
+        limit["reset_at"] = _provider_reset_at(limit["until"] or limit["note"], limit["at"])
+        mutate = lambda rec: rec.update({"limit": limit, "expired_limit": None, "limit_expired_reason": ""})
         msg = "%s hit a usage limit%s%s" % (owner, (" until %s" % a.until) if a.until else "",
                                             (": %s" % a.note) if a.note else "")
     # Read-modify-write under the lock: a watch-loop heartbeat lands on this
@@ -6962,13 +7057,18 @@ def cmd_limits(a, board):
     """Who is limited: manual records + silence + a scan of local tool logs."""
     print("Recorded limits:")
     any_ = False
-    for r in load_agents(board):
-        lim = r.get("limit")
+    records = load_agents(board)
+    records.sort(key=lambda r: _route_headroom()._stamp(
+        (r.get("limit") or r.get("expired_limit") or {}).get("at")) or datetime.min.replace(tzinfo=timezone.utc))
+    for r in records:
+        lim = r.get("limit") or r.get("expired_limit")
         if lim:
             any_ = True
-            print("  %-14s hit %s ago%s%s" % (r["owner"], fmt_hours(hours_since(lim["at"])),
+            expired, _, reason = _route_headroom().limit_expiry(lim)
+            print("  %-14s hit %s ago%s%s%s" % (r["owner"], fmt_hours(hours_since(lim.get("at", ""))),
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
-                                             (" -- %s" % lim["note"]) if lim.get("note") else ""))
+                                             (" -- %s" % lim["note"]) if lim.get("note") else "",
+                                             (" [STALE: %s; no longer blocks]" % reason) if expired else ""))
     if not any_:
         print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
@@ -7391,6 +7491,48 @@ def cmd_assign(a, board):
                     t = got
                     changed.append("claimed for %s" % a.owner)
                     bind_owner = a.owner
+            elif t["status"] == "review" and a.owner:
+                # T-1460: retarget an IN REVIEW ticket so the assignee can act.
+                # Free seat → claimed; already holding another → open+reserved
+                # (same one-active-hold rule as assign on open).
+                held = _held_claimed(board, a.owner, except_id=t["id"])
+                if held:
+                    t["status"] = "open"
+                    t["owner"] = ""
+                    t["reserved_for"] = a.owner
+                    if prev_owner:
+                        clear_prev = prev_owner
+                    lock = os.path.join(board, t["id"] + ".lock")
+                    if os.path.exists(lock):
+                        try:
+                            os.unlink(lock)
+                        except OSError:
+                            pass
+                    changed.append("reserved for %s (already holds %s); left IN REVIEW for revision" % (
+                        a.owner, ", ".join(x["id"] for x in held)))
+                else:
+                    if prev_owner and prev_owner != a.owner:
+                        clear_prev = prev_owner
+                        tc = _recovery()
+                        if tc is not None:
+                            harness = ""
+                            try:
+                                harness = _agent_harness(board, a.owner)[0]
+                            except Exception:
+                                harness = ""
+                            expected_generation = tc.owner_generation(t)
+                            tc.issue_owner_lease(
+                                t, a.owner, harness=harness,
+                                reason="review-retarget",
+                                previous_owner=prev_owner)
+                            rewrite_lock_to = a.owner
+                    t["status"] = "claimed"
+                    t["owner"] = a.owner
+                    if not t.get("claimed_at"):
+                        t["claimed_at"] = now()
+                    bind_owner = a.owner
+                    transfer_owner = a.owner
+                    changed.append("claimed for %s (returned from review)" % a.owner)
             elif t["status"] in ("claimed", "review"):
                 if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
                     transfer_owner = a.owner
@@ -8316,7 +8458,11 @@ def _health_body(board, tickets):
                     t["id"], ",".join(missing)),
                     "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
-        if r.get("limit"):
+        warning = _stale_limit_warning(board, r)
+        if warning:
+            out.append(("WARN", warning, "atm pending --agent %s" % r["owner"]))
+            continue
+        if _route_headroom().seat_limit(r):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
             out.append(("WARN", "%s hit a usage limit %s ago%s%s" % (
                 r["owner"], fmt_hours(hours_since(r["limit"]["at"])),
@@ -8340,7 +8486,7 @@ def _health_body(board, tickets):
             continue
         rec = agents_by.get(who) or {}
         reason = ""
-        if rec.get("limit"):
+        if _route_headroom().seat_limit(rec):
             reason = "limited"
         elif not rec.get("seen"):
             reason = "no heartbeat"
@@ -8365,14 +8511,58 @@ def cmd_reopen(a, board):
     t = load(board, a.id)
     _refuse_unreleased_deps(t, load_all(board), only_done=True)
     notes = getattr(a, "notes", "") or ""
+    revision = bool(getattr(a, "revision", False))
     # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
     # ticket to `next` while notes still read as REVIEW. Claimed work that
     # never entered review stays reopenable without notes (T-246).
-    if (t["status"] == "review" or t.get("review_at")) and not notes.strip():
+    if (t["status"] == "review" or t.get("review_at") or revision) and not notes.strip():
         sys.exit(
             'reopen of IN REVIEW work needs --notes "why" '
             "(silent reopen returns it to next and looks like a next-reissue bug)"
         )
+    # T-1460: explicit revise request -- return to the author as claimed,
+    # distinct from release-to-pool reopen (which clears owner → open).
+    if revision:
+        if t.get("status") != "review":
+            sys.exit("--revision only applies while the ticket is IN REVIEW")
+        prev_owner = (t.get("owner") or "").strip()
+        if not prev_owner:
+            sys.exit("%s has no owner to return the revision to" % a.id)
+        actor = whoami(getattr(a, "by", ""))
+        before = t["status"]
+        _work_view().supersede_release_evidence(t)
+        author = _review_verdict().return_to_author_for_revision(
+            t, actor=actor, reason=notes, sha="", kind="revision")
+        t["owner"] = prev_owner
+        t["reopened_at"] = now()
+        t["reopened_seen"] = [
+            _msg_id(m) for m in load_messages(board)
+            if (m.get("re") or "").strip() == t["id"]
+        ]
+        tc = _recovery()
+        if tc is not None:
+            harness = ""
+            try:
+                harness = _agent_harness(board, prev_owner)[0]
+            except Exception:
+                harness = ""
+            tc.issue_owner_lease(
+                t, prev_owner, harness=harness, reason="revision-request",
+                previous_owner=prev_owner)
+            tc.rewrite_claim_lock(board, t["id"], prev_owner)
+        save(board, t)
+        _safe(lambda: traj_event(
+            board, "reopen", agent=actor, ticket=t,
+            state_before=before, state_after="claimed",
+            outcome="revision", prev_owner=prev_owner,
+            notes_len=len(notes), **_traj_git()), None)
+        _safe(lambda: _bind_agent_ticket(board, prev_owner, t["id"]), None)
+        _safe(lambda: post_message(
+            board, actor,
+            "%s returned for revision: %s" % (t["id"], notes[:160]),
+            to=prev_owner, re=t["id"], task=True, source="review"), None)
+        print("%s returned to %s as claimed for revision" % (a.id, author or prev_owner))
+        return
     if notes:
         # Attribute to the acting agent, not the ticket's outgoing owner --
         # reopen is very often one agent (a reviewer, the master) sending
@@ -8468,8 +8658,31 @@ def cmd_board_restore(a, board):
     print(json.dumps(result, indent=2))
 
 
+def _board_source(board):
+    """How board_dir() found `board`, in words, for `atm where` (stderr)."""
+    if os.environ.get("TICKETS_DIR"):
+        return "TICKETS_DIR"
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    real = os.path.realpath(board)
+    if configured and os.path.realpath(configured) == real:
+        return "the board linked to repo %s in %s" % (root, _atman_config_path())
+    if _is_marked_primary(board):
+        return "this repo's own .tickets (marked primary)"
+    return "the nearest .tickets directory; no board is linked for this repo"
+
+
 def cmd_where(a, board):
+    # stdout line 1 is always the board path (scripts read it); the
+    # explanation goes to stderr so it never changes that contract.
     print(board)
+    source = _board_source(board)
+    sys.stderr.write("found via: %s\n" % source)
+    if source.startswith("the nearest") and _repo_root():
+        sys.stderr.write(
+            "to make every checkout of this repo use one shared board: "
+            "atm board-link <path to that board's .tickets>\n"
+        )
     kids = child_boards(os.getcwd())
     if len(kids) > 1:
         print("other live boards in child dirs:")
@@ -8588,6 +8801,72 @@ def cmd_doctor(a):
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
         print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+
+
+def _read_board_config():
+    path = _atman_config_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return path, {"boards": {}}
+    except (OSError, ValueError) as e:
+        sys.exit("cannot read %s (%s) -- fix or move it aside; nothing changed" % (path, e))
+    if not isinstance(data, dict) or not isinstance(data.get("boards", {}), dict):
+        sys.exit("%s is not {\"boards\": {...}} -- fix or move it aside; nothing changed" % path)
+    data.setdefault("boards", {})
+    return path, data
+
+
+def cmd_board_link(a):
+    """Link a repo to a shared board in the machine config (T-959 map), so
+    every checkout and worktree of that repo resolves it without TICKETS_DIR."""
+    path, data = _read_board_config()
+    boards = data["boards"]
+    if a.show:
+        if not boards:
+            print("no boards linked (%s)" % path)
+        for repo, board in sorted(boards.items()):
+            print("%s -> %s" % (repo, board))
+        return
+    if a.repo:
+        repo = os.path.realpath(os.path.expanduser(a.repo))
+    else:
+        repo = _repo_root()
+        if not repo:
+            sys.exit("not inside a git repo -- pass --repo PATH")
+        repo = os.path.realpath(repo)
+    if a.unlink:
+        if boards.pop(repo, None) is None:
+            sys.exit("no board linked for %s; nothing changed" % repo)
+        _write_board_config(path, data)
+        print("unlinked %s" % repo)
+        return
+    if not a.board:
+        sys.exit("usage: atm board-link <board dir> [--repo PATH] | --show | --unlink")
+    board = os.path.realpath(os.path.expanduser(a.board))
+    if not os.path.isdir(board):
+        sys.exit("no such directory: %s" % board)
+    if not _board_has_content(board):
+        sys.exit("%s does not look like a board (no tickets, messages or agents); nothing changed" % board)
+    boards[repo] = board
+    _write_board_config(path, data)
+    print("linked %s -> %s (%s)" % (repo, board, path))
+    local = os.path.join(repo, ".tickets")
+    if os.path.realpath(local) != board and _is_marked_primary(local):
+        print(
+            "note: %s is marked primary and still wins for this repo; remove %s "
+            "to use the linked board" % (local, os.path.join(local, PRIMARY_BOARD_MARKER))
+        )
+
+
+def _write_board_config(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def cmd_board_mark_primary(a):
@@ -8730,7 +9009,7 @@ def cmd_who(a, board):
         if r.get("note"):
             print("%-14s %s" % ("", "\"%s\"" % r["note"][:90]))
         entry = wf.get(r["owner"], {}) or {}
-        harness_name = entry.get("harness") or entry.get("tool") or "claude"
+        harness_name = _seat_harness(board, r["owner"])
         ep, _ = sa.live_endpoint(board, r["owner"])
         life = lifecycle_of(board, r["owner"], workforce=wf)
         native = sa.native_wake_online(board, r["owner"])
@@ -8741,10 +9020,11 @@ def cmd_who(a, board):
         reachable = sa.is_reachable(native_online=native, watcher_online=watcher_on,
                                     remote_online=remote_on)
         print("%-14s lifecycle=%s provider=%s session=%s reachable=%s" % (
-            "", life, (ep or {}).get("provider") or harness_name,
+            "", life, (ep or {}).get("provider") or harness_name or "unknown",
             (ep or {}).get("session_id") or (ep or {}).get("thread") or (ep or {}).get("pid") or "-",
             "yes" if reachable else "no"))
-        usage = _provider_usage().get_reading(board, harness_name)
+        usage = _provider_usage().get_reading(
+            board, _usage_ledger_key(board, r["owner"]))
         print("%-14s %s" % ("", _provider_usage().format_usage_line(usage).strip()))
     # collisions
     by_branch = {}
@@ -8887,7 +9167,7 @@ def cmd_steer(a, board):
             payload = st.frame_payload(kind, sender, text, tid, steer_id, at)
             # Native Claude inject only. Persist-watch poke would start a new
             # run; that is kill-and-replace, not a mid-run steer.
-            label = sa.wake_seat(board, seat, payload, harness=harness or "claude",
+            label = sa.wake_seat(board, seat, payload, harness=harness or provider,
                                  message_id=steer_id)
     record = st.steer_record(kind, sender, seat, text, label, steer_id, tid, at)
     note = st.ticket_note(kind, sender, seat, text, label, steer_id, at)
@@ -10448,7 +10728,9 @@ def _task_life_actionable(board, message):
         return True
     try:
         t = load(board, tid)
-    except Exception:
+    except (Exception, SystemExit):
+        # load() sys.exits on a missing ticket; SystemExit is BaseException, so
+        # a bare `except Exception` lets it kill the UI handler thread (T-1381).
         return True
     if not t:
         return True
@@ -10620,6 +10902,31 @@ def deliver_wakes(board, m, announce=None):
             board, to, label, mid), None)
         labels.append((to, label))
     return labels
+
+
+def _usage_ledger_key(board, seat):
+    """Provider the usage ledger is filed under for this seat.
+
+    Display stays unknown when join recorded no harness. The ledger is
+    still the launch default from harness_of (claude, unless a harness
+    was stored), so a bare `atm join` keeps its USAGE line.
+    """
+    return harness_of(board, seat)[0]
+
+
+def _display_harness(board, seat):
+    """Who/list/self/brief: unknown, never an invented claude badge."""
+    return _seat_harness(board, seat) or "unknown"
+
+
+def _launch_harness_label(board, owner, explicit="", resolved=""):
+    """Spawn/check print: recorded name, or 'claude (default)' when invented."""
+    if (explicit or "").strip():
+        return (resolved or explicit).strip()
+    recorded = _seat_harness(board, owner)
+    if recorded:
+        return recorded
+    return "%s (default)" % ((resolved or "claude").strip() or "claude")
 
 
 def _should_poke_persist(label):
@@ -11765,7 +12072,11 @@ def cmd_join(a, board):
     save_workforce(board, wf)
     if getattr(a, "persistent", False):
         sa = _session_adapters()
-        reg = sa.register_persistent(board, owner, harness or entry.get("harness") or "claude", now())
+        persist_harness = (harness or entry.get("harness") or "").strip()
+        persist_defaulted = not persist_harness
+        if persist_defaulted:
+            persist_harness = "claude"
+        reg = sa.register_persistent(board, owner, persist_harness, now())
         if reg.get("ok"):
             pid = (reg.get("record") or {}).get("pid")
             mode = reg.get("mode") or (reg.get("record") or {}).get("mode") or "native"
@@ -11774,10 +12085,15 @@ def cmd_join(a, board):
             lease = reg.get("lease_id") or (reg.get("record") or {}).get("lease_id") or ""
             if lease:
                 extra += "; lease %s" % lease
-            print("persistent: %s %s endpoint registered for %s (%s)" % (
-                mode, reg.get("provider"), owner, extra))
+            print("persistent: %s %s endpoint registered for %s (%s)%s" % (
+                mode, reg.get("provider"), owner, extra,
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
         else:
-            print("persistent: %s" % reg.get("reason", "registration failed"))
+            print("persistent: %s%s" % (
+                reg.get("reason", "registration failed"),
+                " [claude (default); pass --harness to pick a provider]"
+                if persist_defaulted else ""))
     join_cwd = os.path.abspath(getattr(a, "worktree", "") or "") or None
     rec = checkin(board, owner, None, "joined" + (" (%s)" % harness if harness else ""),
                   cwd=join_cwd)
@@ -12615,48 +12931,37 @@ def cmd_remote(a, board):
 
 
 def _provider_reset_at(text, observed_at):
-    """Normalize only explicit, unambiguous provider reset times.
+    return _route_headroom().provider_reset_at(text, observed_at)
 
-    Bare clock times without a timezone remain display-only. Resolve a daily
-    clock against detection time once, never against each subsequent poll.
-    """
-    from datetime import timedelta
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-    value = (text or "").strip()
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if stamp.tzinfo is not None:
-            return stamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    except ValueError:
-        pass
-    match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^()]+)\)", value, re.I)
-    if not match:
+
+def _stale_limit_warning(board, rec):
+    lim = rec.get("limit") or rec.get("expired_limit")
+    if not lim:
         return ""
-    hour, minute, meridiem, zone = match.groups()
-    if not 1 <= int(hour) <= 12 or not 0 <= int(minute or 0) < 60:
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
+    started = _route_headroom()._stamp(_read_run(board, rec["owner"]).get("started"))
+    if not expired or (started and started > deadline):
         return ""
-    try:
-        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00")).astimezone(ZoneInfo(zone))
-    except (ValueError, ZoneInfoNotFoundError):
-        return ""
-    reset = observed.replace(hour=int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0),
-                             minute=int(minute or 0), second=0, microsecond=0)
-    if reset <= observed:
-        reset += timedelta(days=1)
-    return reset.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return "%s stale usage limit no longer blocks: %s; check seat resumed" % (rec["owner"], reason)
+
+
+def _seat_limit_expired_at(rec):
+    # Read-only snapshots must suppress the same old rejection as mutating reads.
+    lim = rec.get("limit")
+    if lim:
+        expired, deadline, _ = _route_headroom().limit_expiry(lim)
+        if expired:
+            return deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return rec.get("limit_expired_at") or ""
 
 
 def _active_seat_limit(board, owner, rec=None):
-    """Expire observed limits atomically; unknown resets require explicit clear."""
+    """Expire limits atomically using the shared bounded retry policy."""
     rec = rec if rec is not None else (_agent_rec(board, owner) or {})
     lim = rec.get("limit")
-    if not lim or not lim.get("reset_at"):
-        return lim
-    try:
-        reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-        expired = reset.tzinfo is not None and reset <= datetime.now(timezone.utc)
-    except (ValueError, TypeError):
-        expired = False
+    if not lim:
+        return None
+    expired, deadline, reason = _route_headroom().limit_expiry(lim)
     if not expired:
         return lim
     if getattr(_WATCH_TABLE, "read_only", False):
@@ -12665,7 +12970,9 @@ def _active_seat_limit(board, owner, rec=None):
         if current.get("limit") != lim:
             return False
         current.pop("limit", None)
-        current["limit_expired_at"] = lim["reset_at"]
+        current["limit_expired_at"] = deadline.strftime("%Y-%m-%dT%H:%M:%SZ")
+        current["limit_expired_reason"] = reason
+        current["expired_limit"] = lim
         # A quota failure must not keep the same trigger exhausted after reset.
         current.pop("adapter_failure", None)
     current = _agent_update(board, owner, clear)
@@ -12704,20 +13011,23 @@ def _watch_note_limit_from_log(board, owner, log_slice, rc=1, timed_out=False,
     if match:
         until = match.group(1).strip()
     observed = now()
+    _active_seat_limit(board, owner)
     lim = {"at": observed, "until": until, "note": note[:400],
            "source": "provider", "harness": harness,
-           "reset_at": _provider_reset_at(until, observed)}
+           "reset_at": _provider_reset_at(note, observed)}
     def record(rec):
         if rec.get("limit"):
             return False
         rec["limit"] = lim
         rec.pop("limit_expired_at", None)
+        rec.pop("limit_expired_reason", None)
+        rec.pop("expired_limit", None)
     if _agent_update(board, owner, record) is None:
         return
     reason = "LIMITED: %s; %s. Automatic retrigger paused %s." % (
         owner, lim["note"],
         ("until " + lim["reset_at"]) if lim["reset_at"] else
-        ("(provider reset %s; explicit limit clear required)" % (until or "unknown")))
+        ("(provider reset %s; bounded retry window applies)" % (until or "unknown")))
     # Scan actual held claims; a run's stale binding must never annotate work
     # already transferred to a different seat.
     from contextlib import nullcontext
@@ -13109,7 +13419,8 @@ def seat_brief_text(board, owner):
     second usage formatter is a second thing to keep honest.
     """
     sb = _seat_brief()
-    harness, _ = _safe(lambda: harness_of(board, owner), ("claude", "")) or ("claude", "")
+    harness = _safe(lambda: _seat_harness(board, owner), "") or ""
+    usage_key = _safe(lambda: _usage_ledger_key(board, owner), "") or "claude"
     rec = _safe(lambda: _agent_rec(board, owner), {}) or {}
     roles = _safe(lambda: roles_for(board, owner), None) or []
     m = _safe(lambda: current_master(board), None) or {}
@@ -13120,7 +13431,7 @@ def seat_brief_text(board, owner):
     if reviewer == owner:
         reviewer = ""  # a seat is never its own reviewer
     usage = _safe(lambda: _provider_usage().brief_usage_line(
-        _provider_usage().get_reading(board, harness)), "") or ""
+        _provider_usage().get_reading(board, usage_key)), "") or ""
     t = _seat_ticket(board, owner) or {}
     return sb.compose(
         owner,
@@ -15690,7 +16001,7 @@ def cmd_spawn(a, board):
             entry = wf.get(r["owner"], {})
             print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
                 r["owner"][:14], wlabel,
-                (entry.get("harness") or entry.get("tool") or "claude")[:9],
+                _display_harness(board, r["owner"])[:9],
                 wake_mode_of(board, r["owner"], workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
@@ -15703,8 +16014,6 @@ def cmd_spawn(a, board):
     warn = run_timeout_floor_warning(getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN))
     if warn and not a.stop:
         print(warn)
-    if not a.stop:
-        _refuse_limited_seat(board, owner, "spawn")
     if a.stop:
         return _spawn_stop(board, owner, all_boards=bool(getattr(a, "all_boards", False)))
     requested_harness = getattr(a, "harness", "") or a.tool
@@ -15716,6 +16025,9 @@ def cmd_spawn(a, board):
         if _agent_holds_ticket(board, owner):
             sys.exit("refusing --transfer: %s holds a ticket; reopen or finish it first" % owner)
         _strip_identity_bound_state(board, owner)
+    # Reuse/transfer first: a leftover limit is identity-bound state, not a
+    # live dispatch block on a name we are about to refuse or strip.
+    _refuse_limited_seat(board, owner, "spawn")
     git_root, wt, expected_origin, base, origin_err = _resolve_spawn_target(
         board, owner,
         worktree_arg=getattr(a, "worktree", "") or "",
@@ -15881,7 +16193,8 @@ def cmd_spawn(a, board):
                  "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
     print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
-        owner, pid, harness, model,
+        owner, pid, _launch_harness_label(
+            board, owner, getattr(a, "harness", "") or a.tool, harness), model,
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
         getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
     print("cmd: %s" % cmd)
@@ -16991,7 +17304,7 @@ def cmd_harness(a, board):
             e = wf.get(n, {}) or {}
             rec = _agent_rec(board, n) or {}
             print("%-16s %-12s %-14s %s" % (
-                n[:16], (e.get("harness") or e.get("tool") or "claude")[:12],
+                n[:16], _display_harness(board, n)[:12],
                 _harness_check_label(rec.get("harness_check")),
                 e.get("cmd") or "(built-in)"))
         return
@@ -16999,7 +17312,9 @@ def cmd_harness(a, board):
     if owner.startswith("agent-"):
         sys.exit("harness check needs an agent name: atm harness check <name>")
     harness, cmd_template = harness_of(board, owner, a.harness, a.cmd_template)
-    print("checking %s: harness=%s%s" % (owner, harness, (" cmd=%s" % cmd_template) if cmd_template else ""))
+    print("checking %s: harness=%s%s" % (
+        owner, _launch_harness_label(board, owner, a.harness, harness),
+        (" cmd=%s" % cmd_template) if cmd_template else ""))
     res = harness_probe(board, owner, a.harness, a.cmd_template, a.model, a.cwd, a.timeout)
     _safe(lambda: _agent_set(board, owner, harness_check=res), None)
     print("  cmd:      %s" % res["cmd"])
@@ -19527,6 +19842,11 @@ def _ui_post_as_operator(board, payload, operator):
     kind = str((payload or {}).get("kind") or "message").strip() or "message"
     if kind not in _UI_MSG_KINDS:
         raise ValueError("kind must be message or task")
+    # Match cmd_msg: refuse a missing --re before anything is posted (T-1381).
+    # Without this, post_message succeeds and deliver_wakes -> load() sys.exits,
+    # which escapes the handler's `except Exception` and drops the connection.
+    if re_ and not os.path.isfile(ticket_path(board, re_)):
+        raise ValueError("no such ticket: %s" % re_)
     return post_message(
         board, operator, text, to, re_, kind=kind, explicit=operator,
         via="ui-operator", sender_kind="operator",
@@ -20078,6 +20398,88 @@ def _ui_dep_state(dep):
     return dep.get("status") or "open"
 
 
+def _ui_newest_accept_verdict(verdicts, *, applies=None):
+    """Newest non-superseded accept verdict, optionally filtered by applies.
+
+    Matches ``work_view._unbound_accept_event`` (newest wins), not first-match.
+    """
+    latest = None
+    for v in verdicts or []:
+        if (v.get("kind") or "").lower() != "accept":
+            continue
+        if v.get("superseded"):
+            continue
+        if applies is True and not v.get("applies"):
+            continue
+        if applies is False and v.get("applies"):
+            continue
+        latest = v
+    return latest
+
+
+def _ui_unbound_accept_message(verdicts, tid=""):
+    """Plain sentence when an accept exists but is not bound to review_head.
+
+    ``done --force`` then ``accept --sha`` records the event without
+    ``review_head``, so ``accepted`` stays false and the verdict's
+    ``applies`` is false. Name that gap instead of "no proof recorded".
+    ``atm review`` refuses DONE work — reopen + claim + review + accept.
+    """
+    v = _ui_newest_accept_verdict(verdicts, applies=False)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    slot = (tid or "").strip() or "<id>"
+    return (
+        "accept by @%s on %s is not bound to a review head: "
+        'run atm reopen %s --notes "...", then claim, then atm review, '
+        "then atm accept --sha <new head>" % (by, short, slot)
+    )
+
+
+def _ui_applying_accept_not_done_message(verdicts):
+    """Accept applies at the current head, but status is not yet done."""
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if not v:
+        return ""
+    by = (v.get("by") or "").strip() or "?"
+    sha = (v.get("sha") or "").strip()
+    short = sha[:7] if sha else "?"
+    return "Accepted by @%s on %s (not marked done yet)" % (by, short)
+
+
+def _ui_acceptance_proof(t, accepted, review_label, verdicts=None):
+    """What the drill-down shows under ACCEPTANCE PROOF.
+
+    ``t.proof`` is the sounding/capture sentence when one exists. An accepted
+    ticket without that sentence still has a verification record — the
+    structured accept/merge (who + sha). Prefer that label over silence so the
+    app never says "no proof recorded" next to "Accepted by @seat on <sha>".
+    When an accept exists but does not apply (no review_head), say so plainly.
+    When an accept applies while the ticket is still IN REVIEW, name that too.
+    """
+    sounding = (t.get("proof") or "").strip()
+    if sounding:
+        return sounding
+    if not accepted:
+        applying = _ui_applying_accept_not_done_message(verdicts)
+        if applying:
+            return applying
+        return _ui_unbound_accept_message(verdicts, tid=t.get("id") or "")
+    label = (review_label or "").strip()
+    if label:
+        return label
+    v = _ui_newest_accept_verdict(verdicts, applies=True)
+    if v:
+        by = (v.get("by") or "").strip() or "?"
+        sha = (v.get("sha") or "").strip()
+        short = sha[:7] if sha else "unrecorded artifact"
+        return "Accepted by @%s on %s" % (by, short)
+    return ""
+
+
 def ui_ticket(board, tid, operator, project, include_archives=False):
     """GET /ticket/<id>.json: the drill-down. Board files only; no git.
 
@@ -20164,6 +20566,7 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
     target = sha or branch
     deps = [{"id": d, "state": _ui_dep_state(by_id.get(d)),
              "title": (by_id.get(d) or {}).get("title") or ""} for d in t.get("deps") or []]
+    review_label = (review.get("label") or "").strip()
     return {
         "id": tid, "project": project, "title": t.get("title") or "",
         "status": status, "status_label": status_label,
@@ -20172,8 +20575,11 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
         "owner": (t.get("owner") or "").strip(),
         "owner_at_project": ("%s@%s" % (t.get("owner"), project)) if t.get("owner") else "",
         "deps": deps,
-        "acceptance": {"proof": (t.get("proof") or "").strip()},
-        "review": {"head": head, "head_len": len(head), "label": review.get("label") or "",
+        # Sounding proof (cause/change/proof) when present; for an accepted
+        # ticket the structured accept/merge label is the verification proof
+        # (who + sha). Never leave "no proof recorded" beside "Accepted by".
+        "acceptance": {"proof": _ui_acceptance_proof(t, accepted, review_label, verdicts)},
+        "review": {"head": head, "head_len": len(head), "label": review_label,
                    "verified": verified, "verdicts": verdicts},
         "runs": runs,
         "usage": usage,
@@ -20245,6 +20651,8 @@ _UI_API_PREFIX = "/api/v1/"
 _UI_API_VERSION = 1
 _UI_CLIENT_HEADER = "X-Atman-Client"
 _UI_APP_PREFIX = "/app/"
+# Keep in sync with install.sh UI_BUILD_CMD (T-1443).
+_UI_BUILD_CMD = "npm install && npm run build -w ui"
 _UI_STATIC_TYPES = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
     ".mjs": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
@@ -20501,6 +20909,36 @@ def ui_api_get(ctx, route, q):
     return _ui_json(404, {"error": "no such route"})
 
 
+
+def _ui_missing_app_page(app_dir):
+    """HTML 200 when ui/dist is absent: name the build command, never a bare 404."""
+    import html as _html
+    cmd = _html.escape(_UI_BUILD_CMD)
+    where = _html.escape(app_dir)
+    body = (
+        "<!doctype html><html lang=\"en\"><head>"
+        "<meta charset=\"UTF-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>atman — build the local app</title>"
+        "<style>"
+        "body{font:16px/1.45 system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;"
+        "color:#ece8e1;background:#0c0e12}"
+        "code,pre{font:14px/1.4 ui-monospace,Menlo,monospace;background:#161a22;padding:.15rem .4rem;"
+        "border-radius:4px}"
+        "pre{display:block;padding:.75rem 1rem;overflow:auto}"
+        "a{color:#6aa9ff}"
+        "</style></head><body>"
+        "<h1>Build the local app</h1>"
+        "<p>No bundle at <code>%s</code>. From the Atman checkout run:</p>"
+        "<pre>%s</pre>"
+        "<p>Then restart <code>atm ui</code> and open <code>/app/</code>. "
+        "Or pass <code>atm ui --app-dir DIR</code> if the bundle lives elsewhere.</p>"
+        "<p><code>./install.sh</code> runs that build when Node and npm are on PATH.</p>"
+        "</body></html>"
+    ) % (where, cmd)
+    return 200, "text/html; charset=utf-8", body.encode()
+
+
 def ui_app_file(ctx, route):
     """GET /app/...: the built TypeScript app. index.html carries the
     per-launch token in <meta name="atman-token"> (same-origin page load; the
@@ -20510,8 +20948,9 @@ def ui_app_file(ctx, route):
     rel = rel or "index.html"
     root = ctx.app_dir
     if not os.path.isfile(os.path.join(root, "index.html")):
-        return _ui_json(404, {"error": "no app bundle at %s; build it: npm run build -w ui "
-                                       "(or pass atm ui --app-dir DIR)" % root})
+        # Never a bare JSON 404: strangers who skipped the UI build still get
+        # a page that names the one-line fix (T-1443).
+        return _ui_missing_app_page(root)
     path = os.path.realpath(os.path.join(root, rel))
     if not (path == root or path.startswith(root + os.sep)):
         return _ui_json(404, {"error": "not found"})
@@ -21543,7 +21982,7 @@ def cmd_hook_run(a, board):
         # fires do not (the brief's own "no second briefing" line).
         cmd_prompt(argparse.Namespace(
             agent=owner, master=kind == "master", cos=kind == "cos", extra="",
-            run_no=_task_wake_run_no(board, owner)), board)
+            run_no=_safe(lambda: _task_wake_run_no(board, owner), "")), board)
         return
     sys.exit("unsupported hook event %s" % a.event)
 
@@ -22061,7 +22500,20 @@ class _LoudArgumentParser(argparse.ArgumentParser):
     stderr, but with an explicit NO CHANGE WAS MADE as the trailing line, so
     the tail of the output is the warning rather than the caller's own text.
     add_subparsers() propagates this class to every subparser by default
-    (parser_class defaults to type(self)), so this covers all of them."""
+    (parser_class defaults to type(self)), so this covers all of them.
+
+    ``_lazy_release_epilog`` defers ``release_status()`` until help is formatted
+    so ``atm --version`` hashes the release tree only once (T-1080).
+    """
+    def __init__(self, *args, lazy_release_epilog=False, **kwargs):
+        self._lazy_release_epilog = lazy_release_epilog
+        argparse.ArgumentParser.__init__(self, *args, **kwargs)
+
+    def format_help(self):
+        if self._lazy_release_epilog and not self.epilog:
+            self.epilog = release_status()
+        return argparse.ArgumentParser.format_help(self)
+
     def error(self, message):
         self.print_usage(sys.stderr)
         self.exit(2, "%(prog)s: error: %(message)s\n%(prog)s: NO CHANGE WAS MADE\n" % {
@@ -22154,6 +22606,73 @@ def release_status():
 release_version = release_status
 
 
+def _source_behind_lines(root, head, remote):
+    """Warn when this checkout's HEAD is a strict ancestor of origin/main."""
+    if not (root and head and remote and head != remote):
+        return []
+    if git("merge-base", "--is-ancestor", head, remote, cwd=root) is None:
+        return []
+    quoted = shlex.quote(root)
+    return [
+        "WARNING: running source %s is behind origin/main %s"
+        % (head[:12], remote[:12]),
+        "refresh: git -C %s fetch origin && git -C %s merge --ff-only origin/main"
+        % (quoted, quoted),
+    ]
+
+
+def _same_commit(left, right):
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a or not b:
+        return False
+    n = min(len(a), len(b), 40)
+    if n < 7:
+        return False
+    return a[:n] == b[:n]
+
+
+def _pinned_release_upgrade_line(pinned):
+    short = pinned[:12] if len(pinned or "") >= 12 else (pinned or "")
+    return (
+        "pinned release %s; newer releases can't be checked from here: "
+        "brew upgrade atman (or re-run install_live)" % short
+    )
+
+
+def runtime_version_report():
+    """What `atm --version` prints: package version, provenance, the file
+    that is running, and a behind warning when this checkout is older than
+    origin/main.
+
+    First line is ``PACKAGE_VERSION`` (e.g. ``0.3.0``) on every install shape
+    that executes this file. Second line is ``release_status()``. Extra lines
+    are T-1080: an operator worktree must not silently pin last week's CLI
+    (``atm steer`` missing from ``--help``).
+
+    When release.json names a commit, that commit is the running source.
+    An enclosing git repo (dotfiles / ~/.claude) is probed only when its
+    HEAD equals that commit. Otherwise print the brew/tarball upgrade path.
+    """
+    status = release_status()
+    script = os.path.realpath(__file__)
+    lines = [PACKAGE_VERSION, status, "source: %s" % script]
+    pinned = _release_commit()
+    root = _git_root_from(script)
+    head = (git("rev-parse", "HEAD", cwd=root) if root else None) or ""
+    if pinned and not (head and _same_commit(head, pinned)):
+        lines.append(_pinned_release_upgrade_line(pinned))
+        return "\n".join(lines)
+    if head:
+        lines.append("source-sha: %s" % head)
+        remote = (
+            git("rev-parse", "-q", "--verify", "origin/main", cwd=root)
+            or git("rev-parse", "-q", "--verify", "origin/master", cwd=root)
+            or "")
+        lines.extend(_source_behind_lines(root, head, remote))
+    return "\n".join(lines)
+
+
 def cmd_self(a, board):
     """Print which tickets.py is executing and how it was installed."""
     import shutil
@@ -22172,7 +22691,7 @@ def cmd_self(a, board):
     print("why:    %s" % why)
     print("whoami: %s" % whoami())
     if board and seat and not seat.startswith("agent-"):
-        harness = (load_workforce(board).get(seat, {}) or {}).get("harness") or "claude"
+        harness = _seat_harness(board, seat)
         sa = _session_adapters()
         ep, was_stale = sa.live_endpoint(board, seat)
         stored = sa.read_endpoint(board, seat)
@@ -22186,6 +22705,9 @@ def cmd_self(a, board):
         elif was_stale:
             print("persistent: no -- seat %s had a native endpoint but it went stale "
                   "(re-register with `atm join %s --persistent`)" % (seat, seat))
+        elif not harness:
+            print("persistent: no -- seat %s has no harness recorded (unknown); "
+                  "will not probe claude" % seat)
         else:
             probe = sa.probe_provider(sa.provider_for_harness(harness) or harness)
             print("persistent: no -- seat %s has no native endpoint (probe: %s)" % (
@@ -22283,7 +22805,7 @@ def _feedback_seat_counts(board):
 
     agent_liveness() scans the process table (`ps`, sometimes `lsof`) and
     clears expired limits by rewriting the agent file, so feedback cannot
-    use it. LIMITED is a recorded limit that has not reached its reset_at;
+    use it. LIMITED is a recorded limit whose shared expiry policy is active;
     "stalled" is a seat whose recorded watcher pid (agents/<seat>.watch.pid)
     is no longer running -- a signal-0 probe, not a process scan.
     """
@@ -22294,19 +22816,9 @@ def _feedback_seat_counts(board):
         if not owner:
             continue
         lim = rec.get("limit")
-        if lim:
-            active = True
-            if lim.get("reset_at"):
-                try:
-                    reset = datetime.fromisoformat(lim["reset_at"].replace("Z", "+00:00"))
-                    if reset.tzinfo is None:
-                        reset = reset.replace(tzinfo=timezone.utc)  # naive stamps are UTC
-                    active = reset > now_utc
-                except (ValueError, TypeError):
-                    pass
-            if active:
-                limited += 1
-                continue
+        if lim and _route_headroom().seat_limit(rec, now_utc):
+            limited += 1
+            continue
         try:
             with open(os.path.join(agents_dir(board), owner + ".watch.pid")) as f:
                 pid = int((f.read() or "0").strip() or 0)
@@ -22407,11 +22919,26 @@ def cmd_feedback(a, board):
     print(text)
 
 
+class _RawVersion(argparse.Action):
+    """Print runtime_version_report() without HelpFormatter wrapping (T-1080)."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS,
+                 default=argparse.SUPPRESS, help=None):
+        argparse.Action.__init__(
+            self, option_strings=option_strings, dest=dest, default=default,
+            nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        sys.stdout.write(runtime_version_report() + "\n")
+        parser.exit()
+
+
 def main():
-    status = release_status()
+    # Defer release_status() until help; --version calls it once inside
+    # runtime_version_report() (T-1080 REQUEST CHANGES).
     p = _LoudArgumentParser(prog=cli_prog(), description=__doc__.split("\n")[0],
-                           epilog=status)
-    p.add_argument("--version", action="version", version=status)
+                           lazy_release_epilog=True)
+    p.add_argument("--version", action=_RawVersion, help="show program's version number and exit")
     sub = p.add_subparsers(dest="cmd")
 
     c = sub.add_parser("create", help="create one ticket")
@@ -22593,6 +23120,13 @@ def main():
 
     c = sub.add_parser("doctor", help="diagnose board resolution and detect shadow boards (T-959)")
     c.set_defaults(fn=cmd_doctor)
+
+    c = sub.add_parser("board-link", help="link this repo to a shared board so every checkout finds it")
+    c.add_argument("board", nargs="?", help="the shared board's .tickets directory")
+    c.add_argument("--repo", help="repo to link (default: the repo you are in)")
+    c.add_argument("--show", action="store_true", help="list linked repos and boards")
+    c.add_argument("--unlink", action="store_true", help="remove this repo's link")
+    c.set_defaults(fn=cmd_board_link)
 
     c = sub.add_parser("board-mark-primary", help="opt this repo's local .tickets in as its board of record")
     c.set_defaults(fn=cmd_board_mark_primary)
@@ -22994,7 +23528,7 @@ def main():
     c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
     c.set_defaults(fn=cmd_accept)
 
-    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c = sub.add_parser("reject", help="reject the submitted SHA and return the ticket to its author as claimed")
     c.add_argument("id")
     c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
     c.add_argument("--reason", required=True, help="why this artifact is rejected")
@@ -23189,6 +23723,9 @@ def main():
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="",
                    help="why it's being reopened (required for IN REVIEW / review_at)")
+    c.add_argument("--revision", action="store_true",
+                   help="T-1460: return IN REVIEW work to its owner as claimed for revision "
+                        "(instead of releasing to open)")
     c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 
@@ -23297,6 +23834,8 @@ def main():
         register(sub, globals())
 
     a = p.parse_args()
+    # After --version may have exited: hash once for drift warning / help epilog.
+    status = release_status()
     if status.startswith("tickets DRIFTED") or status.startswith("tickets INVALID"):
         print("WARNING: %s -- see 'atm --version'" % status, file=sys.stderr)
     if not a.cmd:
@@ -23316,7 +23855,7 @@ def main():
             found = None
         cmd_self(a, found if found and os.path.isdir(found) else None)
         return
-    if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
+    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow"):
         # Diagnose/repair board resolution itself; must not go through
         # board_dir() or a shadow board is refused before we can report it.
         a.fn(a)

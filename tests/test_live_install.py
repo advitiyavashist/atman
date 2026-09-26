@@ -43,7 +43,12 @@ def test_stage_activate_provenance_and_immutable_source(source, tmp_path):
     installer.install(repo, sha, live, activate=True)
     assert os.access(live, os.X_OK)
     output = subprocess.check_output([str(live), "--version"], text=True)
-    assert output.strip() == "tickets commit %s (verified release)" % sha
+    lines = output.strip().splitlines()
+    tk_spec = importlib.util.spec_from_file_location("tickets_live_ver", ROOT / "tickets.py")
+    tk = importlib.util.module_from_spec(tk_spec)
+    tk_spec.loader.exec_module(tk)
+    assert lines[0] == tk.PACKAGE_VERSION
+    assert "tickets commit %s (verified release)" % sha in lines
     assert sha in subprocess.check_output([str(live), "--help"], text=True)
     assert str(release / "tickets.py") in live.read_text()
     target = release / "src" / "ticket_board" / "board_backup.py"

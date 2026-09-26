@@ -17,6 +17,9 @@ atm ui --operator <name> --app-dir path/to/dist       # serve a bundle from some
 - `--operator` names the person using the app (T-1104). The name needs an `agents/<name>.json` on the board and must not be a harness-run seat. `atm join <name>` with no `--harness` registers a person. With no operator the API is read-only: `operator` is `""`, `operator_note` says how to set one, and `POST /api/v1/lead` answers 400 ("set an operator").
 - `--dev-origin` may be repeated. Each value must be a loopback `http(s)://host:port` origin. Anything else makes `atm ui` exit.
 - `--app-dir` defaults to `ui/dist` next to `tickets.py`. The bundle is served at `/app/`.
+  `./install.sh` builds that directory when Node/npm are on PATH. If the
+  bundle is missing, `GET /app/` returns an HTML page that names
+  `npm install && npm run build -w ui` (never a bare JSON 404).
 
 ## Security model
 

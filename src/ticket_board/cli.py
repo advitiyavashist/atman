@@ -2602,14 +2602,37 @@ def cmd_accept(a, board):
 
 
 def cmd_reject(a, board):
-    """Record a structured reject bound to the submitted review head (T-944)."""
+    """Record a structured reject and return the ticket to its author (T-944/T-1460).
+
+    API decideReview(reject) already flips state to claimed with the same owner.
+    CLI used to leave status=review, so atm mine stayed empty and the author
+    idled until a coordinator ran reopen+assign. Reject now matches the API.
+    """
     t = load(board, a.id)
+    reviewer = whoami()
     ev, err = _rv.apply(
-        t, whoami(), a.sha, "reject", reason=a.reason, require_full=False)
+        t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
     if err:
         sys.exit(err)
+    author = _rv.return_to_author_for_revision(
+        t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
+        kind="reject")
+    tc = _recovery()
+    if tc is not None and author:
+        tc.issue_owner_lease(
+            t, author, harness=_lease_harness(board, author),
+            reason="reject-revision", previous_owner=author)
+        tc.rewrite_claim_lock(board, t["id"], author)
     save(board, t)
-    print("%s rejected %s by %s" % (a.id, ev["sha"], ev["by"]))
+    if author:
+        _bind_agent_ticket(board, author, t["id"])
+        post_message(
+            board, reviewer,
+            "%s rejected %s -- revise and resubmit: %s" % (
+                t["id"], ev["sha"][:12], ev.get("reason") or ""),
+            to=author, re=t["id"], task=True)
+    print("%s rejected %s by %s; returned to %s as claimed for revision" % (
+        a.id, ev["sha"], ev["by"], author or "?"))
 
 
 def _trunk():
@@ -3035,6 +3058,8 @@ def cmd_limit(a, board):
             rec.pop("limit", None)
         else:
             rec["limit"] = {"at": now(), "until": a.until or "", "note": a.note or ""}
+            lim = rec["limit"]
+            lim["reset_at"] = _route_headroom().provider_reset_at(lim["until"] or lim["note"], lim["at"])
 
     rec = _locked_agent_update(board, owner, mutate)
     if rec is None:
@@ -3056,13 +3081,18 @@ def cmd_limits(a, board):
     """Who is limited: manual records + silence + a scan of local tool logs."""
     print("Recorded limits:")
     any_ = False
-    for r in load_agents(board):
-        lim = r.get("limit")
+    records = load_agents(board)
+    records.sort(key=lambda r: _route_headroom()._stamp(
+        (r.get("limit") or r.get("expired_limit") or {}).get("at")) or datetime.min.replace(tzinfo=timezone.utc))
+    for r in records:
+        lim = r.get("limit") or r.get("expired_limit")
         if lim:
             any_ = True
-            print("  %-14s hit %s ago%s%s" % (r["owner"], fmt_hours(hours_since(lim["at"])),
+            expired, _, reason = _route_headroom().limit_expiry(lim)
+            print("  %-14s hit %s ago%s%s%s" % (r["owner"], fmt_hours(hours_since(lim.get("at", ""))),
                                              (", back %s" % lim["until"]) if lim.get("until") else "",
-                                             (" -- %s" % lim["note"]) if lim.get("note") else ""))
+                                             (" -- %s" % lim["note"]) if lim.get("note") else "",
+                                             (" [STALE: %s; no longer blocks]" % reason) if expired else ""))
     if not any_:
         print("  none (agents record one with `atm limit --until \"...\"`)")
     print("")
@@ -3338,6 +3368,43 @@ def cmd_assign(a, board):
                     t = got
                     changed.append("claimed for %s" % a.owner)
                     bind_owner = a.owner
+            elif t["status"] == "review" and a.owner:
+                # T-1460: retarget an IN REVIEW ticket so the assignee can act.
+                # Free seat → claimed; already holding another → open+reserved
+                # (same one-active-hold rule as assign on open).
+                held = _held_claimed(board, a.owner, except_id=t["id"])
+                if held:
+                    t["status"] = "open"
+                    t["owner"] = ""
+                    t["reserved_for"] = a.owner
+                    if prev_owner:
+                        clear_prev = prev_owner
+                    lock = os.path.join(board, t["id"] + ".lock")
+                    if os.path.exists(lock):
+                        try:
+                            os.unlink(lock)
+                        except OSError:
+                            pass
+                    changed.append("reserved for %s (already holds %s); left IN REVIEW for revision" % (
+                        a.owner, ", ".join(x["id"] for x in held)))
+                else:
+                    if prev_owner and prev_owner != a.owner:
+                        clear_prev = prev_owner
+                        tc = _recovery()
+                        if tc is not None:
+                            expected_generation = tc.owner_generation(t)
+                            tc.issue_owner_lease(
+                                t, a.owner, harness=_lease_harness(board, a.owner),
+                                reason="review-retarget",
+                                previous_owner=prev_owner)
+                            rewrite_lock_to = a.owner
+                    t["status"] = "claimed"
+                    t["owner"] = a.owner
+                    if not t.get("claimed_at"):
+                        t["claimed_at"] = now()
+                    bind_owner = a.owner
+                    transfer_owner = a.owner
+                    changed.append("claimed for %s (returned from review)" % a.owner)
             elif t["status"] in ("claimed", "review"):
                 if t["status"] == "claimed" and a.owner and a.owner != prev_owner:
                     transfer_owner = a.owner
@@ -3997,6 +4064,12 @@ def health(board, tickets):
                     t["id"], ",".join(missing)),
                     "atm join <agent> --can %s   # e.g. grok, it has its own machine" % ",".join(missing)))
     for r in load_agents(board):
+        lim = r.get("limit") or r.get("expired_limit")
+        if lim and _route_headroom().limit_expiry(lim)[0]:
+            out.append(("WARN", "%s stale usage limit no longer blocks: %s; check seat resumed" % (
+                r["owner"], _route_headroom().limit_expiry(lim)[2]),
+                "atm pending --agent %s" % r["owner"]))
+            continue
         if r.get("limit"):
             held = [t["id"] for t in tickets if t["status"] == "claimed" and t.get("owner") == r["owner"]]
             out.append(("WARN", "%s hit a usage limit %s ago%s%s" % (
@@ -4016,7 +4089,7 @@ def health(board, tickets):
             continue
         rec = agents_by.get(who) or {}
         reason = ""
-        if rec.get("limit"):
+        if _route_headroom().seat_limit(rec):
             reason = "limited"
         elif not rec.get("seen"):
             reason = "no heartbeat"
@@ -4041,14 +4114,47 @@ def cmd_reopen(a, board):
     t = load(board, a.id)
     _refuse_unreleased_deps(t, load_all(board), only_done=True)
     notes = getattr(a, "notes", "") or ""
+    revision = bool(getattr(a, "revision", False))
     # T-394: silent reopen of IN REVIEW (or review_at leftover) returns the
     # ticket to `next` while notes still read as REVIEW. Claimed work that
     # never entered review stays reopenable without notes (T-246).
-    if (t["status"] == "review" or t.get("review_at")) and not notes.strip():
+    if (t["status"] == "review" or t.get("review_at") or revision) and not notes.strip():
         sys.exit(
             'reopen of IN REVIEW work needs --notes "why" '
             "(silent reopen returns it to next and looks like a next-reissue bug)"
         )
+    # T-1460: explicit revise request -- return to the author as claimed,
+    # distinct from release-to-pool reopen (which clears owner → open).
+    if revision:
+        if t.get("status") != "review":
+            sys.exit("--revision only applies while the ticket is IN REVIEW")
+        prev_owner = (t.get("owner") or "").strip()
+        if not prev_owner:
+            sys.exit("%s has no owner to return the revision to" % a.id)
+        actor = whoami(getattr(a, "by", ""))
+        before = t["status"]
+        _work_view().supersede_release_evidence(t)
+        author = _rv.return_to_author_for_revision(
+            t, actor=actor, reason=notes, sha="", kind="revision")
+        t["owner"] = prev_owner
+        tc = _recovery()
+        if tc is not None:
+            tc.issue_owner_lease(
+                t, prev_owner, harness=_lease_harness(board, prev_owner),
+                reason="revision-request", previous_owner=prev_owner)
+            tc.rewrite_claim_lock(board, t["id"], prev_owner)
+        save(board, t)
+        traj_event(board, "reopen", agent=actor, ticket=t,
+                   state_before=before, state_after="claimed",
+                   outcome="revision", prev_owner=prev_owner,
+                   notes_len=len(notes), **_traj_git())
+        _bind_agent_ticket(board, prev_owner, t["id"])
+        post_message(
+            board, actor,
+            "%s returned for revision: %s" % (t["id"], notes[:160]),
+            to=prev_owner, re=t["id"], task=True)
+        print("%s returned to %s as claimed for revision" % (a.id, author or prev_owner))
+        return
     if notes:
         t["notes"].append({"by": whoami(getattr(a, "by", "")), "at": now(), "text": notes})
     before = t["status"]
@@ -4130,8 +4236,31 @@ def cmd_board_restore(a, board):
     print(json.dumps(result, indent=2))
 
 
+def _board_source(board):
+    """How board_dir() found `board`, in words, for `atm where` (stderr)."""
+    if os.environ.get("TICKETS_DIR"):
+        return "TICKETS_DIR"
+    root = _repo_root()
+    configured = _configured_shared_board(root) if root else None
+    real = os.path.realpath(board)
+    if configured and os.path.realpath(configured) == real:
+        return "the board linked to repo %s in %s" % (root, _atman_config_path())
+    if _is_marked_primary(board):
+        return "this repo's own .tickets (marked primary)"
+    return "the nearest .tickets directory; no board is linked for this repo"
+
+
 def cmd_where(a, board):
+    # stdout line 1 is always the board path (scripts read it); the
+    # explanation goes to stderr so it never changes that contract.
     print(board)
+    source = _board_source(board)
+    sys.stderr.write("found via: %s\n" % source)
+    if source.startswith("the nearest") and _repo_root():
+        sys.stderr.write(
+            "to make every checkout of this repo use one shared board: "
+            "atm board-link <path to that board's .tickets>\n"
+        )
     kids = child_boards(os.getcwd())
     if len(kids) > 1:
         print("other live boards in child dirs:")
@@ -4247,6 +4376,72 @@ def cmd_doctor(a):
             more = "" if len(s["recipients"]) <= 20 else " (+%d more)" % (len(s["recipients"]) - 20)
             print("    messages addressed to: %s%s" % (", ".join(shown), more))
         print("    fix: atm board-archive-shadow %s --yes   (moves it aside; never deletes)" % shadow)
+
+
+def _read_board_config():
+    path = _atman_config_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return path, {"boards": {}}
+    except (OSError, ValueError) as e:
+        sys.exit("cannot read %s (%s) -- fix or move it aside; nothing changed" % (path, e))
+    if not isinstance(data, dict) or not isinstance(data.get("boards", {}), dict):
+        sys.exit("%s is not {\"boards\": {...}} -- fix or move it aside; nothing changed" % path)
+    data.setdefault("boards", {})
+    return path, data
+
+
+def cmd_board_link(a):
+    """Link a repo to a shared board in the machine config (T-959 map), so
+    every checkout and worktree of that repo resolves it without TICKETS_DIR."""
+    path, data = _read_board_config()
+    boards = data["boards"]
+    if a.show:
+        if not boards:
+            print("no boards linked (%s)" % path)
+        for repo, board in sorted(boards.items()):
+            print("%s -> %s" % (repo, board))
+        return
+    if a.repo:
+        repo = os.path.realpath(os.path.expanduser(a.repo))
+    else:
+        repo = _repo_root()
+        if not repo:
+            sys.exit("not inside a git repo -- pass --repo PATH")
+        repo = os.path.realpath(repo)
+    if a.unlink:
+        if boards.pop(repo, None) is None:
+            sys.exit("no board linked for %s; nothing changed" % repo)
+        _write_board_config(path, data)
+        print("unlinked %s" % repo)
+        return
+    if not a.board:
+        sys.exit("usage: atm board-link <board dir> [--repo PATH] | --show | --unlink")
+    board = os.path.realpath(os.path.expanduser(a.board))
+    if not os.path.isdir(board):
+        sys.exit("no such directory: %s" % board)
+    if not _board_has_content(board):
+        sys.exit("%s does not look like a board (no tickets, messages or agents); nothing changed" % board)
+    boards[repo] = board
+    _write_board_config(path, data)
+    print("linked %s -> %s (%s)" % (repo, board, path))
+    local = os.path.join(repo, ".tickets")
+    if os.path.realpath(local) != board and _is_marked_primary(local):
+        print(
+            "note: %s is marked primary and still wins for this repo; remove %s "
+            "to use the linked board" % (local, os.path.join(local, PRIMARY_BOARD_MARKER))
+        )
+
+
+def _write_board_config(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def cmd_board_mark_primary(a):
@@ -6061,7 +6256,7 @@ def main():
     c.add_argument("--notes", "-n", required=True, help="why this artifact is accepted")
     c.set_defaults(fn=cmd_accept)
 
-    c = sub.add_parser("reject", help="record a structured reject of the exact submitted SHA")
+    c = sub.add_parser("reject", help="reject the submitted SHA and return the ticket to its author as claimed")
     c.add_argument("id")
     c.add_argument("--sha", required=True, help="git SHA of the submitted review head")
     c.add_argument("--reason", required=True, help="why this artifact is rejected")
@@ -6184,6 +6379,9 @@ def main():
     c.add_argument("id")
     c.add_argument("--notes", "-n", default="",
                    help="why it's being reopened (required for IN REVIEW / review_at)")
+    c.add_argument("--revision", action="store_true",
+                   help="T-1460: return IN REVIEW work to its owner as claimed for revision "
+                        "(instead of releasing to open)")
     c.add_argument("--by", default="", help="who is reopening it, if not the acting agent")
     c.set_defaults(fn=cmd_reopen)
 
@@ -6229,6 +6427,13 @@ def main():
     c = sub.add_parser("doctor", help="diagnose board resolution and detect shadow boards (T-959)")
     c.set_defaults(fn=cmd_doctor)
 
+    c = sub.add_parser("board-link", help="link this repo to a shared board so every checkout finds it")
+    c.add_argument("board", nargs="?", help="the shared board's .tickets directory")
+    c.add_argument("--repo", help="repo to link (default: the repo you are in)")
+    c.add_argument("--show", action="store_true", help="list linked repos and boards")
+    c.add_argument("--unlink", action="store_true", help="remove this repo's link")
+    c.set_defaults(fn=cmd_board_link)
+
     c = sub.add_parser("board-mark-primary", help="opt this repo's local .tickets in as its board of record")
     c.set_defaults(fn=cmd_board_mark_primary)
 
@@ -6264,7 +6469,7 @@ def main():
     if not a.cmd:
         p.print_help()
         return
-    if a.cmd in ("doctor", "board-mark-primary", "board-archive-shadow"):
+    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow"):
         # These diagnose/repair board resolution itself, so they must not go
         # through board_dir() -- a shadow board is exactly the case they are
         # for, and board_dir() would refuse before they ever ran (T-959).

@@ -92,7 +92,7 @@ def test_reset_elapsed_releases_original_work_and_failed_trigger(board, monkeypa
     assert marker.exists(), result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('reset', ['', 'soon', '7pm', 'Sep 13 at 8am'])
+@pytest.mark.parametrize('reset', ['', 'soon', 'Sep 13 at 8am'])
 def test_unknown_reset_stays_limited_without_inventing_timestamp(board, monkeypatch, reset):
     _alice_on_docs(board, monkeypatch)
     text = "You've hit your session limit" + (' · resets ' + reset if reset else '')

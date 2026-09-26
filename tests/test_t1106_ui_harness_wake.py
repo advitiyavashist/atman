@@ -39,6 +39,10 @@ def test_harness_badge_never_defaults_to_claude(board):
     # here is a person -- what is under test is the HARNESS the record carries
     # for a seat that never declared one.
     run(board, "join", "owner", agent="owner")
+    # T-1381 optional: a seat CLI msg with no harness still shows unknown
+    # (UI posts are always the operator after T-1104).
+    cli = run(board, "msg", "bare seat says hello", "--to", "", agent="bare")
+    assert cli.returncode == 0, cli.stderr
     srv = UiServer(board, probe_prefix="t1106-harness", operator="owner")
     try:
         snap = srv.get("/board.json")
@@ -49,6 +53,9 @@ def test_harness_badge_never_defaults_to_claude(board):
         assert by_name["coded"]["harness"] == "codex"
         assert by_name["coded"]["adapter_provider"] == "codex"
         assert by_name["bare"]["harness"] != "claude"
+        bare_msg = next(m for m in snap["messages"]
+                        if m.get("text") == "bare seat says hello")
+        assert bare_msg["harness"] == "unknown"
         status, out = srv.post("/msg", {
             "text": "no harness on this sender", "to": "",
         })

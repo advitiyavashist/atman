@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import re
 
 COST_RANK = {"low": 0, "medium": 1, "high": 2}
 LEDGER_NAME = "provider_usage.json"
@@ -28,26 +29,86 @@ def remaining_percent(text):
     return val
 
 
-def seat_limit(rec, now=None):
-    """Active T-1022 limit dict or None; a passed reset_at has expired.
+# Retry policy, not a claim that quota is available. Explicit provider resets win.
+UNKNOWN_LIMIT_HOURS = 5
 
-    The one limit check route, next --dispatch, dispatch, next and spawn share
-    in both tickets.py and the packaged cli.py.
-    """
+
+def _stamp(value):
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt if dt.tzinfo is not None else None
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def provider_reset_at(text, observed_at):
+    """Resolve provider text once at capture; bare clocks use host local time."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    value = (text or "").strip()
+    observed = _stamp(observed_at)
+    if observed is None:
+        return ""
+    value = re.sub(r"^.*?resets?\s+(?:at\s+)?", "", value, flags=re.I)
+    reset = _stamp(value)
+    if reset is None:
+        relative = re.search(r"(?:back|retry|try again|resets?)\s+in\s+(\d+)\s*(minutes?|mins?|m|hours?|hrs?|h|seconds?|secs?|s)\b", text or "", re.I)
+        if relative:
+            count, unit = relative.groups()
+            seconds = int(count) * (3600 if unit.lower().startswith('h') else 60 if unit.lower().startswith('m') else 1)
+            try:
+                reset = observed + timedelta(seconds=seconds)
+            except OverflowError:
+                return ""
+        else:
+            match = re.fullmatch(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^()]+)\))?", value, re.I)
+            if not match:
+                return ""
+            hour, minute, meridiem, zone = match.groups()
+            if not 1 <= int(hour) <= 12 or not 0 <= int(minute or 0) < 60:
+                return ""
+            try:
+                local = observed.astimezone(ZoneInfo(zone)) if zone else observed.astimezone()
+            except (ValueError, ZoneInfoNotFoundError):
+                return ""
+            reset = local.replace(hour=int(hour) % 12 + (12 if meridiem.lower() == "pm" else 0),
+                                  minute=int(minute or 0), second=0, microsecond=0)
+            if reset <= local:
+                reset += timedelta(days=1)
+            if not zone:
+                # Re-resolve local DST for the target day rather than retaining
+                # the observation's fixed UTC offset across a transition.
+                reset = reset.replace(tzinfo=None).astimezone()
+    return reset.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def limit_expiry(lim, now=None):
+    """(expired, deadline, reason), shared by read-only and mutating callers."""
+    now = now or datetime.now(timezone.utc)
+    reset = _stamp(lim.get("reset_at"))
+    if reset is not None:
+        return reset <= now, reset, "provider reset elapsed"
+    # Legacy records may have a provider time in until/note but no reset_at.
+    parsed = (provider_reset_at(lim.get("until"), lim.get("at"))
+              or provider_reset_at(lim.get("note"), lim.get("at")))
+    reset = _stamp(parsed)
+    if reset is not None:
+        return reset <= now, reset, "recorded reset elapsed"
+    observed = _stamp(lim.get("at"))
+    if observed is None:
+        return True, now, "limit has no valid observation time; retry permitted"
+    # Only an explicitly named weekly window gets a seven-day hold.
+    weekly = bool(re.search(r"\bweekly\s+(?:usage\s+)?(?:limit|quota)\b", lim.get("note") or "", re.I))
+    hours = 168 if weekly else UNKNOWN_LIMIT_HOURS
+    deadline = observed + timedelta(hours=hours)
+    return deadline <= now, deadline, "no valid reset; %sh retry window elapsed" % hours
+
+
+def seat_limit(rec, now=None):
+    """Active limit or None; unknown resets have a bounded retry window."""
     lim = (rec or {}).get("limit")
-    if not isinstance(lim, dict):
+    if not isinstance(lim, dict) or not lim:
         return None
-    if not (lim.get("at") or lim.get("note") or lim.get("reset_at") or lim.get("until")):
-        return None
-    reset = (lim.get("reset_at") or "").strip()
-    if reset:
-        try:
-            dt = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            dt = None
-        if dt is not None and dt.tzinfo is not None and dt <= (now or datetime.now(timezone.utc)):
-            return None
-    return lim
+    return None if limit_expiry(lim, now)[0] else lim
 
 
 def split_limited(names, agents, limit_of):

@@ -9,8 +9,31 @@ import uuid
 
 PROVIDER_SESSION_ID_VARS = (
     "TICKET_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
-    "CURSOR_SESSION_ID", "TERM_SESSION_ID", "CURSOR_CONVERSATION_ID",
+    "CURSOR_SESSION_ID", "TERM_SESSION_ID", "CURSOR_CONVERSATION_ID", "CODEX_THREAD_ID",
 )
+
+# These identify a running parent session, not reusable provider credentials.
+# A fresh child must obtain its own transport from its harness. In particular,
+# retaining a socket or PID can register the parent under the child's new seat.
+# ATMAN_SESSION_TRANSPORT_BOARD is the T-1114 board announcement; it must not
+# travel into a fresh spawn/watch/probe either.
+FRESH_CHILD_SESSION_VARS = PROVIDER_SESSION_ID_VARS + (
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+    "TICKET_SESSION_PID", "CLAUDE_PID", "CODEX_SESSION_PID", "CURSOR_SESSION_PID",
+    "TICKETS_SESSION_LEASE", "CODEX_APP_SERVER_CONTROL_SOCK", "CODEX_APP_SERVER_SOCKET",
+    "CURSOR_ACP_CONTROL_SOCK", "CURSOR_PERSIST_SESSION", "TMUX", "TMUX_PANE",
+    "ATMAN_SESSION_TRANSPORT_BOARD",
+)
+
+
+def fresh_child_env(environ):
+    """Copy an environment for a new session; explicit attach does not use this.
+
+    Keep credential/config locations and the board cache. Only the child
+    harness may subsequently supply the new session's transport and lease.
+    """
+    return {key: value for key, value in environ.items()
+            if key not in FRESH_CHILD_SESSION_VARS}
 
 
 def remote_wrapper(script, board, owner, prompt_kind=""):
@@ -31,7 +54,7 @@ if [ "$#" -eq 0 ]; then
   exec %s hook-run --agent %s --event task-wake%s
 fi
 exec %s "$@"
-""" % (" ".join(PROVIDER_SESSION_ID_VARS), shlex.quote(owner), shlex.quote(owner),
+""" % (" ".join(FRESH_CHILD_SESSION_VARS), shlex.quote(owner), shlex.quote(owner),
        shlex.quote(sid), shlex.quote(os.path.abspath(board)), executable,
        shlex.quote(owner), prompt, executable)
 

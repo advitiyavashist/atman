@@ -1,0 +1,11 @@
+{
+  "failed-check": {
+    "status": "PASS reject records failed check",
+    "ticket_status": "review",
+    "sha": "804d6f72c6c909c6dc529aed1f64698a5b460e80"
+  },
+  "interchangeability-metadata": {
+    "status": "PASS metadata fencing ONLY; supported second harness execution NOT RUN",
+    "generation": 2
+  }
+}

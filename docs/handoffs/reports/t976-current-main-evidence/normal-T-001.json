@@ -1,0 +1,59 @@
+{
+  "title": "Write CSV statistics",
+  "body": "Cause: journey probe. Change: persisted artifact. Proof: independent assertion.",
+  "role": "backend",
+  "status": "done",
+  "deps": [],
+  "priority": 2,
+  "epic": "",
+  "sprint": "",
+  "needs": [],
+  "owner": "alice",
+  "created": "2026-09-22T12:20:47Z",
+  "updated": "2026-09-22T12:20:51Z",
+  "notes": [
+    {
+      "by": "alice",
+      "at": "2026-09-22T12:20:49Z",
+      "text": "REVIEW: alice@ad72b8c -- stats.json: 3 rows, 2 columns"
+    },
+    {
+      "by": "boss",
+      "at": "2026-09-22T12:20:51Z",
+      "text": "alice@ad72b8c -- stats.json verified"
+    }
+  ],
+  "id": "T-001",
+  "claimed_at": "2026-09-22T12:20:47Z",
+  "done_at": "2026-09-22T12:20:51Z",
+  "owner_generation": 1,
+  "revoked_owners": [],
+  "owner_lease": {
+    "generation": 1,
+    "owner": "alice",
+    "harness": "custom",
+    "issued_at": "2026-09-22T12:20:47.976119+00:00",
+    "reason": "claim",
+    "previous_owner": "",
+    "previous_generation": 0,
+    "revoked_owners": []
+  },
+  "review_at": "2026-09-22T12:20:49Z",
+  "commit": "alice@ad72b8c",
+  "branch": "alice",
+  "repo": "/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/normal/.git",
+  "repo_source": "artifact",
+  "review_head": "ad72b8cb3626b954ace2ba6b9307119e34de322c",
+  "review_events": [
+    {
+      "kind": "accept",
+      "by": "bob",
+      "at": "2026-09-22T12:20:51Z",
+      "sha": "ad72b8cb3626b954ace2ba6b9307119e34de322c",
+      "notes": "Independently read committed JSON; 3 rows and 2 columns"
+    }
+  ],
+  "artifact_dir": "/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/normal/.worktrees/alice",
+  "cwd_repo": "/private/var/folders/qr/j_ljkf713xl8td9p7c7mwznh0000gp/T/t976-journeys-86rz4g6b/normal/.git",
+  "cwd_commit": "main@18063ac"
+}

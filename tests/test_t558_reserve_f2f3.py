@@ -23,6 +23,9 @@ def run(tool, board, *args, agent="", cwd=None):
     e = dict(os.environ, TICKETS_DIR=str(board), TICKET_AGENT=agent or "",
              HOME=str(board.parent.parent / "home"))
     e.pop("TICKETS_STOP_HOOK", None)
+    e.pop("TICKET_SEAT", None)
+    e.pop("TICKET_SESSION_ID", None)
+    e.pop("CLAUDE_CODE_SESSION_ID", None)
     e["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + e.get("PYTHONPATH", "")
     where = cwd or board.parent
     return subprocess.run([sys.executable, str(tool), *args], capture_output=True,
@@ -108,7 +111,7 @@ def test_reserve_refuses_done(tool, board):
     claimed = run(tool, board, "next", agent="alice")
     assert claimed.returncode == 0, claimed.stderr + claimed.stdout
     done = run(tool, board, "done", "T-001", "--notes", "closed for f3", "--force",
-                agent="planner")
+                agent="alice")
     assert done.returncode == 0, done.stderr + done.stdout
     assert show(tool, board, "T-001")["status"] == "done"
     r = run(tool, board, "reserve", "T-001", "--for", "bob", agent="planner")

@@ -73,7 +73,13 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
   const [view, setView] = useState<ViewName>(() => routeFromHash().view);
   const [project, setProject] = useState<string>("");
   const [selected, setSelected] = useState<string>(() => routeFromHash().ticket);
-  const [tab, setTab] = useState<"chat" | "centre">("chat");
+  // Under 900px chat and the centre view are tabs. Default to the centre
+  // (Plan / Needs you / …) so objective, blocker and next owner are on screen
+  // at 390px without an extra tap — the lead picker stays one Chat tap away.
+  const [tab, setTab] = useState<"chat" | "centre">(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return "chat";
+    return window.matchMedia("(max-width: 900px)").matches ? "centre" : "chat";
+  });
 
   const session = useResource(() => api.session(), [api]);
   const projects = useResource(() => api.projects(), [api], POLL_MS * 4);

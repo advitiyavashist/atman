@@ -405,6 +405,107 @@ export function ticketIdsOf(nodes: Array<Pick<PlanNode, "id">>): Set<string> {
   return new Set(nodes.map((n) => n.id));
 }
 
+/**
+ * One short workload line for the project switcher.
+ *
+ * The projects API counts by ticket *status* (`open` / `claimed` / …). The
+ * plan body counts by *phase* (`working` / …). Saying "0 open" beside "1
+ * working" for the same claimed ticket is a lie — prefer the plan's word when
+ * the live work is claimed/review/blocked, and only say "N open" for
+ * status-open tickets.
+ */
+export function projectWorkloadLine(counts: Record<string, number> | undefined): string | null {
+  if (!counts || !Object.keys(counts).length) return null;
+  const claimed = Number(counts.claimed) || 0;
+  const review = Number(counts.review) || 0;
+  const blocked = Number(counts.blocked) || 0;
+  const open = Number(counts.open) || 0;
+  const parts: string[] = [];
+  if (claimed) parts.push(`${claimed} working`);
+  if (review) parts.push(`${review} review`);
+  if (blocked) parts.push(`${blocked} blocked`);
+  if (open) parts.push(`${open} open`);
+  if (parts.length) return parts.join(" · ");
+  return "0 open";
+}
+
+type AcceptVerdict = {
+  kind: string;
+  by: string;
+  sha: string;
+  applies: boolean;
+  superseded: boolean;
+};
+
+/** Newest matching accept — same rule as work_view._unbound_accept_event. */
+function newestAcceptVerdict(
+  verdicts: AcceptVerdict[] | undefined,
+  pred: (v: AcceptVerdict) => boolean,
+): AcceptVerdict | undefined {
+  let latest: AcceptVerdict | undefined;
+  for (const v of verdicts || []) {
+    if (v.kind === "accept" && !v.superseded && pred(v)) latest = v;
+  }
+  return latest;
+}
+
+/**
+ * ACCEPTANCE PROOF on the drill-down.
+ *
+ * Prefer the sounding/capture sentence when present. For an accepted ticket,
+ * fall back to the structured accept record (who + sha) — never "no proof
+ * recorded" next to "Accepted by @seat". When an accept exists but does not
+ * apply (no review_head), name that gap instead of "no proof recorded".
+ * When an accept applies while the ticket is still IN REVIEW, say so plainly.
+ */
+export function acceptanceProofText(ticket: {
+  id?: string;
+  accepted: boolean;
+  acceptance?: { proof?: string };
+  review?: { label?: string; verdicts?: AcceptVerdict[] };
+}): { text: string; missing: string } {
+  const sounding = (ticket.acceptance?.proof || "").trim();
+  if (sounding) return { text: sounding, missing: "" };
+  if (!ticket.accepted) {
+    const applying = newestAcceptVerdict(
+      ticket.review?.verdicts,
+      (x) => x.applies,
+    );
+    if (applying) {
+      const sha = (applying.sha || "").trim();
+      return {
+        text:
+          `Accepted by @${applying.by || "?"} on ${sha ? sha.slice(0, 7) : "?"} ` +
+          "(not marked done yet)",
+        missing: "",
+      };
+    }
+    const unbound = newestAcceptVerdict(
+      ticket.review?.verdicts,
+      (x) => !x.applies,
+    );
+    if (unbound) {
+      const sha = (unbound.sha || "").trim();
+      const slot = (ticket.id || "").trim() || "<id>";
+      return {
+        text:
+          `accept by @${unbound.by || "?"} on ${sha ? sha.slice(0, 7) : "?"} ` +
+          `is not bound to a review head: run atm reopen ${slot} --notes "...", ` +
+          "then claim, then atm review, then atm accept --sha <new head>",
+        missing: "",
+      };
+    }
+    return { text: "", missing: "no proof recorded" };
+  }
+  const label = (ticket.review?.label || "").trim();
+  if (label) return { text: label, missing: "" };
+  const v = newestAcceptVerdict(ticket.review?.verdicts, (x) => x.applies);
+  if (v) {
+    const sha = (v.sha || "").trim();
+    return { text: `Accepted by @${v.by || "?"} on ${sha ? sha.slice(0, 7) : "unrecorded artifact"}`, missing: "" };
+  }
+  return { text: "", missing: "accepted, but accept who/sha not on the record" };
+}
 /* ------------------------------------------------------------ review header */
 
 export interface ReviewHead {
