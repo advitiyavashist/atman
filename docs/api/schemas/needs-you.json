@@ -2,33 +2,139 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.atman.invalid/app-v2/needs-you.json",
   "title": "GET /api/v1/needs-you",
-  "description": "What is waiting on the operator. Unstructured asks only: every item's state is 'asked'. Prose is never a ruling.",
+  "description": "What is waiting on the operator. Prose asks (state 'asked'; prose is never a ruling), plus two structured asks since T-1486: 'review' (an IN REVIEW head with no verdict at that head) and 'seat' (a limited, logged-out or stopped seat holding claimed work). count is the number of items.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["items", "count", "operator", "note"],
+  "required": [
+    "items",
+    "count",
+    "operator",
+    "note"
+  ],
   "properties": {
-    "count": {"type": "integer", "minimum": 0},
-    "operator": {"type": "string"},
-    "note": {"type": "string"},
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "operator": {
+      "type": "string"
+    },
+    "note": {
+      "type": "string"
+    },
     "items": {
       "type": "array",
       "maxItems": 100,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "why", "id", "at", "from", "author", "re", "text", "state", "label"],
+        "required": [
+          "kind",
+          "why",
+          "id",
+          "at",
+          "from",
+          "author",
+          "re",
+          "text",
+          "state",
+          "label"
+        ],
         "properties": {
-          "kind": {"enum": ["message", "escalated"]},
-          "why": {"type": "string"},
-          "id": {"type": "string"},
-          "at": {"type": "string"},
-          "from": {"type": "string"},
-          "author": {"type": "string"},
-          "re": {"type": "string"},
-          "text": {"type": "string", "maxLength": 400},
-          "state": {"const": "asked"},
-          "label": {"const": "asked (unstructured)"}
-        }
+          "kind": {
+            "enum": [
+              "message",
+              "escalated",
+              "review",
+              "seat"
+            ]
+          },
+          "why": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "author": {
+            "type": "string"
+          },
+          "re": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 400
+          },
+          "state": {
+            "const": "asked"
+          },
+          "label": {
+            "enum": [
+              "asked (unstructured)",
+              "review submitted",
+              "seat needs attention"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "message",
+                    "escalated"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "label": {
+                  "const": "asked (unstructured)"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "review"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "label": {
+                  "const": "review submitted"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "seat"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "label": {
+                  "const": "seat needs attention"
+                }
+              }
+            }
+          }
+        ]
       }
     }
   }

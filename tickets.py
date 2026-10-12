@@ -4769,19 +4769,38 @@ def cmd_review(a, board):
     _finish_followup(board, t["id"], "review")
 
 
+def accept_ticket(board, tid, reviewer, sha, notes):
+    """The accept gate, shared by `atm accept` and POST /api/v1/ticket/<id>/accept
+    (T-1486 §6.3): one function, so the CLI and the app refuse the same things.
+
+    Returns ({event, ticket, release}, None) or (None, refusal text). The
+    refusal is review_verdict.refuse's own sentence (author cannot accept,
+    sha must be the full submitted head, notes required).
+    """
+    t = load(board, tid)
+    ev, err = _review_verdict().apply(
+        t, reviewer, sha, "accept", notes=notes, require_full=True)
+    if err:
+        return None, err
+    save(board, t)
+    release = {"freed": [], "started": [], "held": [], "capture_wait": []}
+    if t.get("status") == "done":
+        _reopen_unverified_successors(board, tid, sha=ev["sha"], seat=ev["by"])
+        freed, started, held, capture_wait = _start_successors(board, tid)
+        release = {"freed": list(freed or []), "started": list(started or []),
+                   "held": list(held or []), "capture_wait": list(capture_wait or [])}
+    return {"event": ev, "ticket": t, "release": release}, None
+
+
 def cmd_accept(a, board):
     """Record a structured accept bound to the submitted review head (T-944)."""
-    t = load(board, a.id)
-    ev, err = _review_verdict().apply(
-        t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
+    res, err = accept_ticket(board, a.id, whoami(), a.sha, a.notes)
     if err:
         sys.exit(err)
-    save(board, t)
+    ev, t, rel = res["event"], res["ticket"], res["release"]
     print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
     if t.get("status") == "done":
-        _reopen_unverified_successors(board, a.id, sha=ev["sha"], seat=ev["by"])
-        freed, started, held, capture_wait = _start_successors(board, a.id)
-        _print_successor_release(t, freed, started, held, capture_wait)
+        _print_successor_release(t, rel["freed"], rel["started"], rel["held"], rel["capture_wait"])
 
 
 def cmd_reject(a, board):
@@ -4791,14 +4810,28 @@ def cmd_reject(a, board):
     CLI used to leave status=review, so atm mine stayed empty and the author
     idled until a coordinator ran reopen+assign. Reject now matches the API.
     """
-    t = load(board, a.id)
-    reviewer = whoami()
-    ev, err = _review_verdict().apply(
-        t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
+    res, err = reject_ticket(board, a.id, whoami(), a.sha, a.reason)
     if err:
         sys.exit(err)
+    ev, author = res["event"], res["author"]
+    print("%s rejected %s by %s; returned to %s as claimed for revision" % (
+        a.id, ev["sha"], ev["by"], author or "?"))
+
+
+def reject_ticket(board, tid, reviewer, sha, reason):
+    """The reject gate, shared by `atm reject` and POST /api/v1/ticket/<id>/reject
+    (T-1486 §6.3). Records the verdict, returns the ticket to its author as
+    claimed (T-1460), re-issues the owner lease and posts the revision task.
+
+    Returns ({event, ticket, author, message}, None) or (None, refusal text).
+    """
+    t = load(board, tid)
+    ev, err = _review_verdict().apply(
+        t, reviewer, sha, "reject", reason=reason, require_full=False)
+    if err:
+        return None, err
     author = _review_verdict().return_to_author_for_revision(
-        t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
+        t, actor=reviewer, reason=ev.get("reason") or reason, sha=ev["sha"],
         kind="reject")
     tc = _recovery()
     if tc is not None and author:
@@ -4812,15 +4845,15 @@ def cmd_reject(a, board):
             previous_owner=author)
         tc.rewrite_claim_lock(board, t["id"], author)
     save(board, t)
+    rec = None
     if author:
         _safe(lambda: _bind_agent_ticket(board, author, t["id"]), None)
-        _safe(lambda: post_message(
+        rec = _safe(lambda: post_message(
             board, reviewer,
             "%s rejected %s -- revise and resubmit: %s" % (
                 t["id"], ev["sha"][:12], ev.get("reason") or ""),
             to=author, re=t["id"], task=True, source="review"), None)
-    print("%s rejected %s by %s; returned to %s as claimed for revision" % (
-        a.id, ev["sha"], ev["by"], author or "?"))
+    return {"event": ev, "ticket": t, "author": author, "message": rec}, None
 
 
 def _trunk(cwd=None):
@@ -7430,6 +7463,14 @@ def _ensure(board, kind, ref):
 
 def cmd_assign(a, board):
     """Modify an existing ticket: epic, sprint, role, owner, priority, title."""
+    t, changed = assign_ticket(a, board)
+    print("%s: %s" % (t["id"], ", ".join(changed)))
+
+
+def assign_ticket(a, board):
+    """The assign gate, shared by `atm assign` and POST /api/v1/ticket/<id>/assign
+    (T-1486 §6.3). Returns (ticket, changed). Refusals are SystemExit with the
+    CLI's own sentence; the API turns them into its error field."""
     t = load(board, a.id)
     changed = []
     if a.epic is not None:
@@ -7603,7 +7644,7 @@ def cmd_assign(a, board):
         _safe(lambda: _clear_agent_ticket(board, clear_prev, t["id"]), None)
     if bind_owner:
         _safe(lambda: _bind_agent_ticket(board, bind_owner, t["id"]), None)
-    print("%s: %s" % (t["id"], ", ".join(changed)))
+    return t, changed
 
 
 def cmd_reserve(a, board):
@@ -20761,15 +20802,21 @@ def ui_lead_status(board, lead, agent_map=None):
     }
 
 
-def ui_thread(board, operator, seat, project, before="", limit=100, include_archives=False):
+def ui_thread(board, operator, seat, project, before="", limit=100, include_archives=False, re=""):
     """Operator <-> seat thread, paged back through the whole live log (and
-    the archives on request) -- not the 40-message snapshot window."""
+    the archives on request) -- not the 40-message snapshot window.
+
+    With ``re`` (T-1486 §5.9) the rows are every message about that ticket
+    instead, whoever wrote it; ``seat`` is then ignored."""
     try:
         limit = max(1, min(int(limit or 100), _UI_THREAD_LIMIT_MAX))
     except (TypeError, ValueError):
         limit = 100
     msgs = load_messages(board, include_archives=include_archives)
-    rows = [m for m in msgs if _ui_in_thread(m, operator, seat)]
+    if re:
+        rows = [m for m in msgs if (m.get("re") or "") == re]
+    else:
+        rows = [m for m in msgs if _ui_in_thread(m, operator, seat)]
     if before:
         idx = next((i for i, m in enumerate(rows) if _msg_id(m) == before), None)
         if idx is None:
@@ -20787,9 +20834,15 @@ def ui_thread(board, operator, seat, project, before="", limit=100, include_arch
     }
 
 
-def ui_needs_you(board, operator, project, tickets=None, now_dt=None):
+def ui_needs_you(board, operator, project, tickets=None, now_dt=None, agents=None):
     """Read-only 'Needs you' queue. Unstructured asks only: state is always
-    'asked'. Prose is never a ruling (T-944), so nothing here says 'ruled'."""
+    'asked'. Prose is never a ruling (T-944), so nothing here says 'ruled'.
+
+    T-1486 (spec §9 decision 4) adds two structured kinds so the strip reads
+    one field: ``review`` (a submitted head with no verdict yet at that head)
+    and ``seat`` (a limited, logged-out or stopped seat holding claimed work,
+    from the snapshot's ``agents`` when the caller passes them). Both are
+    still asks on the operator; neither is a ruling."""
     now_dt = now_dt or datetime.now(timezone.utc)
     msgs = load_messages(board)
     op = (operator or "").lower()
@@ -20845,10 +20898,82 @@ def ui_needs_you(board, operator, project, tickets=None, now_dt=None):
                           "from": "", "author": "", "re": t["id"],
                           "text": (auto.get("escalate_reason") or t.get("title") or "")[:400],
                           "state": "asked", "label": "asked (unstructured)"})
+    tickets = tickets if tickets is not None else load_all(board)
+    items.extend(_ui_needs_you_reviews(tickets, operator, project))
+    items.extend(_ui_needs_you_seats(tickets, agents or [], operator, project))
     items.sort(key=lambda x: x.get("at") or "")
     return {"items": items[:100], "count": len(items),
             "operator": operator or "",
             "note": "" if operator else "no operator configured; showing prose asks only"}
+
+
+def _ui_review_notes(t):
+    """The seat's own `atm review --notes` sentence: the newest REVIEW: note."""
+    for n in reversed(t.get("notes") or []):
+        text = (n.get("text") or "").strip() if isinstance(n, dict) else ""
+        if text.upper().startswith("REVIEW:"):
+            return text[len("REVIEW:"):].strip()
+    return ""
+
+
+def _ui_needs_you_reviews(tickets, operator, project):
+    """IN REVIEW tickets with no accept or reject recorded at the submitted
+    head. The author's own ticket is listed too: another seat has to accept
+    it, and that is still something the operator chases (§5.3)."""
+    rv = _review_verdict()
+    out = []
+    for t in tickets:
+        if (t.get("status") or "") != "review":
+            continue
+        head = rv.displayed_review_head(t) or rv.submitted_sha(t)
+        decided = any(
+            not ev.get("superseded") and head and rv.sha_match(ev.get("sha"), head)
+            for ev in rv.iter_structured(t)
+            if (ev.get("kind") or "").lower() in ("accept", "reject"))
+        if decided:
+            continue
+        owner = (t.get("owner") or "").strip()
+        own = bool(operator) and owner.lower() == operator.lower()
+        out.append({"kind": "review",
+                    "why": ("you wrote this; another seat has to accept it" if own
+                            else "waiting for your accept"),
+                    "id": t["id"], "at": t.get("review_at") or t.get("updated") or "",
+                    "from": owner, "author": ("%s@%s" % (owner, project)) if owner else "",
+                    "re": t["id"], "text": _ui_review_notes(t)[:400],
+                    "state": "asked", "label": "review submitted"})
+    return out
+
+
+def _ui_needs_you_seats(tickets, agents, operator, project):
+    """Seats that hold claimed work but cannot run it: limited, logged out, or
+    down (no live session). Records from the board snapshot only."""
+    out = []
+    op = (operator or "").lower()
+    for a in agents or []:
+        name = (a.get("name") or "").strip()
+        if not name or name.lower() == op:
+            continue
+        held = [t["id"] for t in tickets
+                if (t.get("owner") or "").strip() == name and t.get("status") == "claimed"]
+        if not held:
+            continue
+        surf = a.get("auth_surface") or {}
+        if a.get("limit"):
+            until = a.get("limit_until") or "reset unknown"
+            why, text = "limited until %s" % until, "%s is limited until %s. %s is waiting on it." % (
+                name, until, ", ".join(held))
+        elif (surf.get("state") or "") in _UI_AUTH_BLOCKING:
+            cmd = ((surf.get("recovery") or {}).get("cmd") or "atm harness auth %s" % name)
+            why, text = "logged out", "%s is logged out. Run %s." % (name, cmd)
+        elif (a.get("state") or "") == "DOWN":
+            why, text = "stopped", "%s stopped. %s is waiting on it." % (name, ", ".join(held))
+        else:
+            continue
+        out.append({"kind": "seat", "why": why, "id": "seat:%s" % name,
+                    "at": a.get("limit_until") or "", "from": name,
+                    "author": "%s@%s" % (name, project), "re": held[0], "text": text[:400],
+                    "state": "asked", "label": "seat needs attention"})
+    return out
 
 
 def _ui_dep_state(dep):
@@ -21035,6 +21160,7 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
     review_label = (review.get("label") or "").strip()
     return {
         "id": tid, "project": project, "title": t.get("title") or "",
+        "body": (t.get("body") or "").strip(),
         "status": status, "status_label": status_label,
         "accepted": accepted,
         "released": released,
@@ -21345,11 +21471,27 @@ def ui_api_get(ctx, route, q):
     if name == "thread":
         seat = q("with")
         lead, lead_note = ui_lead(board)
-        seat = seat or lead
+        re_ = (q("re") or "").strip()
         out = {"project": slug, "operator": op, "operator_note": why,
-               "lead": lead, "lead_note": lead_note, "with": seat,
+               "lead": lead, "lead_note": lead_note, "with": seat, "re": re_,
                "needs_lead": False, "messages": [], "has_more": False,
                "oldest_id": "", "total_in_window": 0, "archives": q("all") == "1"}
+        if re_:
+            # T-1486 §5.9: the ticket panel's thread -- every message whose
+            # `re` is this ticket, whoever wrote it. Read-only, same shape.
+            if not _UI_TICKET_ID_RE.match(re_):
+                out["error"] = "bad ticket id"
+                return _ui_json(400, out)
+            if not os.path.isfile(ticket_path(board, re_)):
+                out["error"] = "no such ticket %s" % re_
+                return _ui_json(404, out)
+            out.update(ui_thread(board, op, "", slug, before=q("before"), limit=q("limit", "100"),
+                                 include_archives=q("all") == "1", re=re_))
+            if out.get("error"):
+                return _ui_json(400, out)
+            return _ui_json(200, out)
+        seat = seat or lead
+        out["with"] = seat
         if not seat:
             out["needs_lead"] = True
             return _ui_json(200, out)
@@ -21362,7 +21504,9 @@ def ui_api_get(ctx, route, q):
             return _ui_json(400, out)
         return _ui_json(200, out)
     if name == "needs-you":
-        return _ui_json(200, ui_needs_you(board, op, slug))
+        tickets = load_all(board)
+        agents = (_safe(lambda: _ui_snapshot_ro(board), {}) or {}).get("agents") or []
+        return _ui_json(200, ui_needs_you(board, op, slug, tickets=tickets, agents=agents))
     m = re.match(r"^ticket/([^/]+)$", name)
     if m:
         tid = m.group(1)
@@ -21556,12 +21700,73 @@ def ui_api_do_get(handler, api):
     _ui_api_send(handler, api, status, ctype, body)
 
 
+_UI_ACTION_ROUTE_RE = re.compile(r"^ticket/(T-\d{1,7})/(accept|reject|assign)$")
+_UI_ACTION_FIELDS = {"accept": ("sha", "notes"), "reject": ("sha", "reason"), "assign": ("owner", "notes")}
+_UI_READ_ONLY_WHY = "Read-only. Start with atm ui --operator <name> to act."
+
+
+def ui_post_ticket_action(ctx, board, slug, tid, action, payload):
+    """POST /api/v1/ticket/<id>/{accept,reject,assign} (T-1486 §6.3).
+
+    Each is the CLI function behind the verb it names -- accept_ticket,
+    reject_ticket, assign_ticket -- so there is one gate: the operator can
+    no more accept their own work or a stale sha here than with `atm accept`.
+    The 200 body is what was recorded (by, sha, at, the new status), which is
+    what the app's result line shows; a refusal is the CLI's own sentence.
+    """
+    op, why = ctx.operator(board)
+    if not op:
+        return 400, {"ok": False, "error": "%s (%s)" % (_UI_READ_ONLY_WHY, why)}
+    if not os.path.isfile(ticket_path(board, tid)):
+        return 404, {"ok": False, "error": "no such ticket %s" % tid}
+    fields = _UI_ACTION_FIELDS[action]
+    extra = set(payload) - set(fields) - {"project"}
+    if extra:
+        return 400, {"ok": False, "error": "%s accepts only %s" % (action, ", ".join(fields))}
+    val = dict((k, str(payload.get(k) or "").strip()) for k in fields)
+    out = {"ok": True, "action": action, "ticket": tid, "project": slug, "by": op,
+           "sha": "", "at": "", "owner": "", "returned_to": "", "changed": [],
+           "released": [], "started": []}
+    try:
+        if action == "accept":
+            res, err = accept_ticket(board, tid, op, val["sha"], val["notes"])
+            if err:
+                return 409, {"ok": False, "error": err}
+            ev = res["event"]
+            out.update(by=ev["by"], sha=ev["sha"], at=ev["at"], owner=(res["ticket"].get("owner") or ""),
+                       released=res["release"]["freed"], started=res["release"]["started"])
+        elif action == "reject":
+            res, err = reject_ticket(board, tid, op, val["sha"], val["reason"])
+            if err:
+                return 409, {"ok": False, "error": err}
+            ev = res["event"]
+            out.update(by=ev["by"], sha=ev["sha"], at=ev["at"], owner=(res["ticket"].get("owner") or ""),
+                       returned_to=res["author"] or "")
+        else:
+            if not val["owner"]:
+                return 400, {"ok": False, "error": "owner is required: pick a seat"}
+            if not _ui_registered(board, val["owner"]):
+                return 400, {"ok": False, "error": "%s is not a registered seat on this board" % val["owner"]}
+            a = argparse.Namespace(id=tid, owner=val["owner"], notes=val["notes"], by=op, epic=None,
+                                   sprint=None, role=None, needs=None, priority=None, title="",
+                                   worktree=None)
+            t, changed = assign_ticket(a, board)
+            out.update(owner=(t.get("owner") or ""), changed=list(changed), at=t.get("updated") or "")
+    except SystemExit as e:  # the CLI's own refusals (sys.exit with a sentence)
+        return 409, {"ok": False, "error": str(e.code if e.code is not None else e)}
+    view = ui_ticket(board, tid, op, slug) or {}
+    out["status"] = view.get("status") or ""
+    out["status_label"] = view.get("status_label") or ""
+    return 200, out
+
+
 def ui_api_do_post(handler, api):
     """POST /api/v1/*. Called after cmd_ui's gate (loopback Host + launch token)."""
     if _ui_api_refuse_foreign(handler, api):
         return
     route, q = _ui_query(handler.path)
-    if route != _UI_API_PREFIX + "lead":
+    action = _UI_ACTION_ROUTE_RE.match(route[len(_UI_API_PREFIX):]) if route.startswith(_UI_API_PREFIX) else None
+    if route != _UI_API_PREFIX + "lead" and not action:
         _ui_api_send(handler, api, *_ui_json(404, {"ok": False, "error": "no such route"}))
         return
     try:
@@ -21574,7 +21779,10 @@ def ui_api_do_post(handler, api):
         _ui_api_send(handler, api, *_ui_json(404, {"ok": False, "error": "unknown project %s" % slug}))
         return
     try:
-        status, out = ui_post_lead(api, board, payload)
+        if action:
+            status, out = ui_post_ticket_action(api, board, slug, action.group(1), action.group(2), payload)
+        else:
+            status, out = ui_post_lead(api, board, payload)
     except Exception as e:  # noqa: BLE001
         status, out = 400, {"ok": False, "error": str(e)}
     if isinstance(out, dict):
