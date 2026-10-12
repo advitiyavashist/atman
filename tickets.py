@@ -2386,6 +2386,19 @@ def _review_verdict():
         return m
 
 
+def _seat_state():
+    """T-1509 per-seat, per-ticket working STATE file (versioned, protected Goal)."""
+    try:
+        from ticket_board import seat_state as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import seat_state as m
+        return m
+
+
 def _seat_brief():
     """T-1078 seat brief: the gate, the ticket and the refusals, composed."""
     try:
@@ -13321,6 +13334,99 @@ def ticket_context(board, owner):
     return "\n".join(out)
 
 
+def seat_state_context(board, owner, rec=None):
+    """T-1509: the held ticket's working STATE, for the wake prompt.
+
+    Shown whenever this seat -- or, after a reassignment or interrupt, the
+    ticket's previous owner -- kept one, so inheritance needs no opt-in. The
+    "start one" hint goes only to seats that opted in (`atm state --enable`),
+    so every other seat's prompt is unchanged by this spike.
+    """
+    ss = _seat_state()
+    rec = rec if rec is not None else (_agent_rec(board, owner) or {})
+    out = []
+    for t in load_all(board):
+        if t.get("status") != "claimed" or t.get("owner") != owner:
+            continue
+        st = ss.load(board, owner, t, at=now())
+        if st:
+            out.append(ss.prompt_block(t, st))
+        elif rec.get("seat_state"):
+            out.append(ss.empty_hint(t["id"]))
+    return "\n\n".join(out)
+
+
+def cmd_state(a, board):
+    """`atm state [ID]`: read or rewrite this seat's working STATE (T-1509)."""
+    ss = _seat_state()
+    me = whoami(getattr(a, "agent", None))
+    if a.enable or a.disable:
+        _agent_set(board, me, seat_state=bool(a.enable))
+        print("STATE prompt hint %s for %s" % ("on" if a.enable else "off", me))
+        if not a.id:
+            return
+    tid = a.id
+    if not tid:
+        held = [t for t in load_all(board) if t.get("status") == "claimed" and t.get("owner") == me]
+        if len(held) != 1:
+            sys.exit("atm state: name the ticket (you hold %d claimed tickets)" % len(held))
+        tid = held[0]["id"]
+    t = load(board, tid)
+    seat = a.seat or me
+    writing = bool(a.set or a.file)
+    try:
+        if writing:
+            if seat != me:
+                sys.exit("atm state: you can only write your own STATE (you are %s)" % me)
+            if t.get("owner") != me:
+                sys.exit("atm state: %s is owned by %s, not you; its STATE is theirs to write"
+                         % (t["id"], t.get("owner") or "nobody"))
+            text = None
+            if a.file:
+                with open(a.file, encoding="utf-8") as f:
+                    text = f.read()
+            updates = {}
+            for name, value in (a.set or []):
+                updates[name] = value
+            rec, changed = ss.write(board, me, t, updates=updates, replace_text=text, at=now())
+            if not changed:
+                print("%s STATE unchanged (v%s)" % (t["id"], rec.get("v")))
+                return
+            extra = (" (started from %s)" % rec["inherited_from"]) if rec.get("inherited_from") else ""
+            print("%s STATE v%s written%s: %s" % (t["id"], rec["v"], extra,
+                                                  ss.state_path(board, me, t["id"])))
+            return
+        if a.history:
+            hist = ss.history(board, seat, t["id"])
+            if a.json:
+                print(json.dumps(hist, indent=2))
+                return
+            if not hist:
+                print("no STATE history for %s under %s" % (t["id"], seat))
+            for r in hist:
+                print("v%-3s %s  %-24s %s%s" % (r.get("v"), r.get("at", ""), r.get("by", ""),
+                                               r.get("how", ""),
+                                               ("  from " + r["inherited_from"]) if r.get("inherited_from") else ""))
+            return
+        if a.diff is not None:
+            vs = [v for v in a.diff if v]
+            old, new = (vs + [None, None])[:2] if len(vs) == 2 else (None, vs[0] if vs else None)
+            if len(vs) == 1:
+                old = int(vs[0]) - 1
+            print(ss.diff(board, seat, t["id"], old=old, new=new) or "(no difference)")
+            return
+        st = ss.load(board, seat, t, at=now())
+    except ss.StateError as exc:
+        sys.exit("atm state: %s" % exc)
+    if a.json:
+        print(json.dumps(st, indent=2))
+        return
+    if not st:
+        print(ss.empty_hint(t["id"]))
+        return
+    print(ss.prompt_block(t, st, limit=ss.MAX_BODY_CHARS))
+
+
 def _task_dominant_extra(board, owner):
     """Held ticket + explicit task beat unrelated CoS review/notification traffic."""
     pending = _safe(lambda: pending_work(board, owner), {}) or {}
@@ -13470,6 +13576,9 @@ def prompt_text(a, board):
     tctx = ticket_context(board, owner)
     if tctx:
         parts.append("Context attached to your ticket(s):\n" + tctx)
+    sctx = _safe(lambda: seat_state_context(board, owner, rec), "")
+    if sctx:
+        parts.append(sctx)
     if a.extra:
         parts.append(a.extra)
     sb = _seat_brief()
@@ -23745,6 +23854,21 @@ def main():
     x.add_argument("file")
     ks.add_parser("validate", help="validate schema and graph references")
     c.set_defaults(fn=cmd_knowledge, slug="")
+
+    c = sub.add_parser("state", help="read or rewrite your working STATE file for a ticket (T-1509)")
+    c.add_argument("id", nargs="?", help="ticket id (default: the one ticket you hold)")
+    c.add_argument("--set", nargs=2, action="append", metavar=("SECTION", "TEXT"),
+                   help="rewrite one section in place: State, Decisions, 'Tried and failed', Next")
+    c.add_argument("--file", help="replace the whole STATE from a markdown file (## sections)")
+    c.add_argument("--history", action="store_true", help="list every recorded version")
+    c.add_argument("--diff", nargs="*", metavar="V", help="diff versions: none = last two, "
+                   "V = V-1..V, V1 V2 = V1..V2")
+    c.add_argument("--seat", help="read another seat's STATE (read-only)")
+    c.add_argument("--enable", action="store_true", help="opt this seat into the 'start a STATE' prompt hint")
+    c.add_argument("--disable", action="store_true", help="turn the hint off again")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--agent", help=argparse.SUPPRESS)
+    c.set_defaults(fn=cmd_state)
 
     c = sub.add_parser("mine", help="list tickets claimed by this agent")
     c.add_argument("--owner", "-o")
