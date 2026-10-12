@@ -111,7 +111,7 @@ def test_done_force_then_accept_via_real_cli_label_agrees_with_counts(tmp_path):
     assert len(head) == 40
     for agent, args in (("alice", ("claim", "T-001")),
                         ("alice", ("done", "T-001", "--force", "--notes", "shipped")),
-                        ("bob", ("accept", "T-001", "--sha", head[:7], "--notes", "ok"))):
+                        ("bob", ("accept", "T-001", "--sha", head, "--notes", "ok"))):
         r = _cli(board, agent, *args)
         assert r.returncode == 0, r.stdout + r.stderr
     raw = json.loads((board / "T-001.json").read_text())
@@ -139,6 +139,9 @@ def test_done_force_then_accept_via_real_cli_label_agrees_with_counts(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     raw3 = json.loads((board / "T-001.json").read_text())
     assert wv.structured_accept(raw3) and not wv.legacy_accept(raw3)
+    if raw3.get("status") != "done":     # accept is not done; close it
+        r = _cli(board, "alice", "done", "T-001", "--notes", "closed")
+        assert r.returncode == 0, r.stdout + r.stderr
     node2 = _node(tk.ui_plan(str(board), "normal"), "T-001")
     assert node2["accepted"] is True and node2["legacy_accept"] is False
     assert node2["status_label"] == "done, accepted"
