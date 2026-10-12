@@ -1399,7 +1399,8 @@ def _alloc(directory, prefix, width, record):
         return record
 
 
-def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None):
+def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="",
+           needs=None, target_repo=""):
     return _alloc(board, "T", 3, {
         "title": title,
         "body": body,
@@ -1414,7 +1415,42 @@ def create(board, title, body="", role="", deps=None, priority=2, epic="", sprin
         "created": now(),
         "updated": now(),
         "notes": [],
+        **_target_repo_stamp(target_repo),
     })
+
+
+def _target_repo_stamp(explicit=""):
+    """T-1135: record which repository a ticket's deliverable lives in.
+
+    Defaults to the repository the ticket was typed in, which is the right
+    answer whenever an author files follow-up work from the checkout they
+    are working in. It is a guess, so `atm create --target-repo` and
+    `atm assign --target-repo` can state or correct it, and an unset value
+    means "unknown", which keeps the ticket claimable from anywhere.
+
+    Deliberately NOT the `repo` field: that one is the review pin's
+    repository. `atm done` refuses to close from anywhere else and the
+    merge auto-close reads it as evidence about a reviewed sha, so a
+    create-time guess written there would fence off honest closes.
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return {"target_repo": explicit}
+    cwd = os.getcwd()
+    if cwd not in _TARGET_REPO_CACHE:
+        # One probe per directory per process: `atm plan` creates a whole
+        # graph in one run, and 40 tickets should not mean 40 `git config`
+        # calls. Scoped to this process, so a test that rewrites a remote
+        # between CLI invocations still sees the change.
+        try:
+            _TARGET_REPO_CACHE[cwd] = _repo_routing().checkout_repo(cwd)
+        except Exception:
+            _TARGET_REPO_CACHE[cwd] = ""
+    origin = _TARGET_REPO_CACHE[cwd]
+    return {"target_repo": origin} if origin else {}
+
+
+_TARGET_REPO_CACHE = {}
 
 
 # --------------------------------------------------------------------------
@@ -2545,6 +2581,18 @@ def _refuse_preflight(board, owner, harness, verb):
     return result
 
 
+def _repo_routing():
+    try:
+        from ticket_board import repo_routing as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import repo_routing as m
+        return m
+
+
 def _route_headroom():
     try:
         from ticket_board import route_headroom as m
@@ -3122,7 +3170,8 @@ def cmd_create(a, board):
     cur = active_sprint(board)
     sprint = a.sprint if a.sprint is not None else (cur["id"] if cur and a.in_sprint else "")
     t = create(board, a.title, a.body or "", a.role or "", deps, a.priority,
-               a.epic or "", sprint, _ids(a.needs))
+               a.epic or "", sprint, _ids(a.needs),
+               getattr(a, "target_repo", "") or "")
     pending = {}
     for other in blocks:
         o = load(board, other)
@@ -3856,7 +3905,7 @@ def cmd_board(a, board):
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
             "`atm review <id> --notes \"...\"` submits it. A dependent opens only when a "
-            "DIFFERENT seat runs `atm accept <id> --sha <sha>` -- `atm done` alone releases "
+            "DIFFERENT seat runs `atm accept <id> --sha <full 40-char review head>` -- `atm done` alone releases "
             "nothing (atm quickstart --gate shows it)."
         )
     owner = whoami()
@@ -4486,6 +4535,7 @@ def cmd_next(a, board):
     ready = [t for t in ready if not _ticket_on_hold(t)]
     ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
     ready = [t for t in ready if not _worktree_gc().is_automated(t)]
+    ready, repo_miss = _repo_routing().filter_for_checkout(ready, os.getcwd())
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -4540,14 +4590,26 @@ def cmd_next(a, board):
     role_miss, reserved_miss = _next_refusal_parts(
         ready_all, roles, owner, steal_id, board)
     parts = []
+    if repo_miss:
+        # The attribution can be a create-time guess, so name the escape
+        # hatches: an explicit claim still works, and "-" clears a wrong stamp.
+        parts.append(
+            "%d ticket(s) whose repository is not this checkout's: %s"
+            " (claim one explicitly if it really is yours, or correct it with"
+            " `atm assign <id> --target-repo -`)" % (
+                len(repo_miss), ", ".join(t["id"] for t in repo_miss)))
     if role_miss:
         parts.append("%d ready for other roles: %s" % (
             len(role_miss), ", ".join(t["id"] for t in role_miss)))
     if reserved_miss:
         parts.append("%d reserved for other agents: %s" % (
             len(reserved_miss), ", ".join(t["id"] for t in reserved_miss)))
-    if roles is not None and parts:
-        print("no ticket for roles %s; %s" % (roles, "; ".join(parts)))
+    if parts:
+        # A seat that registered no roles has roles None; say that instead
+        # of printing "no ticket for roles None" at it.
+        who = (("roles %s" % (roles,)) if roles else
+               "this seat (no roles registered, so every role was considered)")
+        print("no ticket for %s; %s" % (who, "; ".join(parts)))
         sys.exit(1)
     cyc = find_cycle(tickets)
     if cyc:
@@ -7431,6 +7493,17 @@ def assign_ticket(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
+    if getattr(a, "target_repo", None) is not None:
+        # T-1135: attribute an existing ticket so automatic claims stop
+        # offering it to seats checked out on a different repository. "-"
+        # clears it, which makes the ticket claimable from anywhere again.
+        want = a.target_repo.strip()
+        if want and want != "-":
+            t["target_repo"] = want
+            changed.append("target_repo=%s" % want)
+        else:
+            t.pop("target_repo", None)
+            changed.append("target_repo=(unknown)")
     if getattr(a, "worktree", None) is not None:
         wt = (a.worktree or "").strip()
         if wt:
@@ -7758,7 +7831,14 @@ CLI: `atm` (the `tickets` command is an alias).
 Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
 When they name tasks, use `atm plan` so deps are real `--after` edges.
-Unattended persist ends at a reviewable SHA; human review is the gate.
+Unattended persist ends at a reviewable SHA. That SHA is not the end:
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 """
 
 # Probe-only catalog for a new board. Codex stays listed with unknown usage.
@@ -8083,8 +8163,9 @@ objective; drain the review queue. Show `atm graph` / `atm map`.
 If HEALTH flags prose-only deps, wire `atm dep` instead of leaving
 them in the body.
 
-Unattended persist ends at `atm review` (reviewable SHA); human review is
-the gate. Capture / sound / dispatch (Fatih loop on this board, not a plans/
+Unattended persist ends at `atm review` (reviewable SHA); the gate is a
+DIFFERENT seat recording `atm accept <id> --sha <full 40-char review head>`,
+never the author. Capture / sound / dispatch (Fatih loop on this board, not a plans/
 tree): `atm capture`, `atm sound`, CoS `atm dispatch --harness …`,
 `atm pr-sync` after the PR is merged. CEO does not `atm next`.
 
@@ -8145,20 +8226,26 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 3. You may create, split, re-wire and assign tickets (`create --blocks`,
    `dep`, `assign`, `plan`). Extending the graph is expected, not exceptional.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `atm done` refuses from main or with uncommitted files.
+   `atm review` refuses from main or with uncommitted files.
 5. Post `atm update <id> "..."` at least every 45 minutes and at each
    milestone. Silence longer than that is treated as a timeout.
-6. `done --notes` must include branch@sha (added automatically), the paths
-   you touched, and every decision a dependent ticket must match. Then merge
-   (or open the PR) before claiming the next ticket. Workers submit
-   `atm review` (sounded code tickets need `--pr`); master `atm merge`
-   then `atm done`. `atm pr-sync` reports ready-to-close and does not
-   self-done.
+6. Workers commit, run `atm sync`, then submit `atm review --notes` with paths,
+   tests and decisions dependents must match (sounded code tickets need `--pr`).
+   The integrator follows the accept gate below before `atm merge`.
+   `atm pr-sync` reports integration evidence; it does not supply an accept.
 7. Set `TICKET_AGENT` to your own name so the board can tell agents apart.
 8. Sound before staff: `atm capture` is not claimable. `atm sound`
    fills cause/change/proof/deps. CoS `atm dispatch`. CEO does not
    `atm next`.
 
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 
 ## Sprint plan
 (goals per sprint; `atm sprint list` has the live numbers)
@@ -8295,7 +8382,7 @@ def cmd_master(a, board):
     if queue:
         print("")
         print("REVIEW QUEUE (%d) -- coordinator close is three distinct steps: "
-              "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
+              "`atm accept <id> --sha <full 40-char review head>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
                 t["id"], t.get("owner", "?"), t["title"][:46],
@@ -11164,6 +11251,145 @@ def _traj_summary(events):
     return by_ticket
 
 
+def _traj_absolute_uncollapsed(path):
+    """Make absolute without collapsing ``..`` (keeps symlink parents visible)."""
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.getcwd(), path)
+
+
+def _traj_nearest_existing_ancestor(path):
+    """Walk parents until a lexically-existing path is found (or the root).
+
+    Does not use abspath/normpath: those collapse ``..`` by string and miss
+    symlink escapes into the board (``dlink/../agents/alice.json``).
+    """
+    cur = _traj_absolute_uncollapsed(path)
+    while not os.path.lexists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return cur
+
+
+def _traj_resolved_path_for_board_guard(path):
+    """realpath(nearest existing ancestor) + remaining path components."""
+    abs_path = _traj_absolute_uncollapsed(path)
+    ancestor = _traj_nearest_existing_ancestor(abs_path)
+    if not os.path.lexists(ancestor):
+        return os.path.normpath(abs_path)
+    real_anc = os.path.realpath(ancestor)
+    if abs_path == ancestor:
+        return real_anc
+    if abs_path.startswith(ancestor):
+        rest = abs_path[len(ancestor):].lstrip(os.sep)
+    else:
+        rest = os.path.basename(abs_path)
+    if not rest:
+        return real_anc
+    return os.path.normpath(os.path.join(real_anc, rest))
+
+
+def _traj_path_is_under_board_samefile(path, board):
+    """True when `path` is the board or a descendant, compared by inode.
+
+    Resolves symlink ancestors first, then samefile-walks so case aliases on
+    macOS APFS/HFS+ (``.TICKETS`` vs ``.tickets``) still match by dev/inode.
+    """
+    board_root = os.path.realpath(board)
+    cur = _traj_resolved_path_for_board_guard(path)
+    while True:
+        if os.path.lexists(cur):
+            try:
+                if os.path.samefile(cur, board_root):
+                    return True
+            except OSError:
+                pass
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _traj_export_path_inside_board(out, board):
+    """True when `trajectories export --out` would land under the active board.
+
+    Mirror of ticket_board.trajectories.export_path_inside_board (T-1140).
+    Root tickets.py ships alone, so this copy cannot import the package helper.
+    Symlink ``--out`` / ``<out>.tmp`` are refused; path checks resolve symlink
+    ancestors before ``..`` collapse, then samefile/dev-inode for case aliases.
+    """
+    if not out or not board:
+        return False
+    try:
+        if os.path.islink(out) or os.path.islink(out + ".tmp"):
+            return True
+        return (
+            _traj_path_is_under_board_samefile(out, board)
+            or _traj_path_is_under_board_samefile(out + ".tmp", board)
+        )
+    except (OSError, ValueError):
+        return True
+
+
+def _refuse_traj_export_inside_board(out, board):
+    if _traj_export_path_inside_board(out, board):
+        sys.exit(
+            "REFUSING: trajectories export --out must live outside the ticket "
+            "board (would replace board records): %s" % out
+        )
+
+
+def _traj_open_export_tmp(tmp):
+    """Create ``<out>.tmp`` with O_CREAT|O_EXCL|O_NOFOLLOW (no symlink follow)."""
+    if os.path.islink(tmp):
+        sys.exit(
+            "REFUSING: trajectories export temp path must not be a symlink "
+            "(would follow into the board): %s" % tmp
+        )
+    if os.path.lexists(tmp):
+        if os.path.isdir(tmp) and not os.path.islink(tmp):
+            sys.exit(
+                "REFUSING: trajectories export temp path is a directory: %s" % tmp
+            )
+        os.unlink(tmp)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    try:
+        return os.open(tmp, flags, 0o644)
+    except OSError as exc:
+        sys.exit(
+            "REFUSING: cannot create trajectories export temp file safely: "
+            "%s (%s)" % (tmp, exc)
+        )
+
+
+def _traj_write_export_file(out, events):
+    """Write JSONL events to --out via a nofollow temp file + os.replace."""
+    if os.path.islink(out):
+        sys.exit(
+            "REFUSING: trajectories export --out must not be a symlink: %s" % out
+        )
+    tmp = out + ".tmp"
+    fd = _traj_open_export_tmp(tmp)
+    try:
+        with os.fdopen(fd, "w") as f:
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+        os.replace(tmp, out)
+    except Exception:
+        try:
+            if os.path.lexists(tmp) and not os.path.islink(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def cmd_trajectories(a, board):
     """Read, export or backfill the trajectory log."""
     sub = getattr(a, "traj_cmd", "list") or "list"
@@ -11179,11 +11405,8 @@ def cmd_trajectories(a, board):
         out = getattr(a, "out", "") or ""
         if not out:
             sys.exit("export needs --out <file.jsonl>")
-        tmp = out + ".tmp"
-        with open(tmp, "w") as f:
-            for e in sel:
-                f.write(json.dumps(e) + "\n")
-        os.replace(tmp, out)
+        _refuse_traj_export_inside_board(out, board)
+        _traj_write_export_file(out, sel)
         print("exported %d event(s) of %d to %s" % (len(sel), len(events), out))
         return
     limit = int(getattr(a, "limit", 0) or 0)
@@ -11567,8 +11790,14 @@ Then the loop, until `atm next` says nothing is ready:
     atm msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
     atm review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
-    # human review is the gate; then:
     atm next
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 
 Plan dependent work with `atm plan` so JSON `deps` become real `--after`
 edges (`atm graph` to inspect). Unattended persist ends at that reviewable
@@ -12252,7 +12481,9 @@ def cmd_connect(a, board):
     print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
     print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
     print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
+    print("Unattended persist ends at a reviewable SHA. A DIFFERENT seat must "
+          "then record `atm accept <id> --sha <full 40-char review head>`; "
+          "no seat accepts its own work.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
     _apply_connect_roles(board, a)
@@ -13063,14 +13294,24 @@ Ordinary messages and ACKs are notification-only and must not extend the run.
 If there is no standing objective with a measurable --exit criterion, ask for one
 (`atm objective "<what done looks like>" --exit "<observable end>"`) and do not invent it.
 Transition the objective with `--done`/`--achieved`, `--blocked`, or `--replaced` when that is the outcome.
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
+
 Your three jobs, every wake-up:
 1. UNBLOCK: `atm inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
    grant context (`atm brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
    (`atm create ... --blocks <id>`, `atm dep`), reassign (`atm assign <id> --owner <who>`), or
    decide and say so. Never leave a stuck agent without a reply.
 2. REVIEW + MERGE: `atm master` shows the REVIEW QUEUE. For each entry read the diff against main
-   (`git diff main...<branch>`), check tests ran, then `atm merge <branch>` (runs the suite, fast-forwards
-   main, closes the ticket). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
+   (`git diff main...<branch>`), check tests ran and obtain a DIFFERENT seat's structured
+   accept at the exact current review head before `atm merge <branch>` (runs the suite and
+   integrates the accepted head). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
    and `atm reopen <id>`. Push main with `git push origin main` after merges.
 3. COORDINATE: `atm dash --once` and `atm util` -- reopen tickets whose owner is silent > 90 min
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
@@ -13089,14 +13330,24 @@ Ordinary messages and ACKs are notification-only and must not extend the run.
 Read the current standing objective as context only. Do not ask for, set, replace, or invent an objective;
 escalate those decisions to the master with `atm msg --to <master>`.
 The master planner sets scope and routes by complexity; you review, unblock and merge.
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
+
 Your three jobs, every wake-up:
 1. UNBLOCK: `atm inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
    grant context (`atm brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
    (`atm create ... --blocks <id>`, `atm dep`), reassign (`atm assign <id> --owner <who>`), or
    decide and say so. Never leave a stuck agent without a reply.
 2. REVIEW + MERGE: `atm master` shows the REVIEW QUEUE. For each entry read the diff against main
-   (`git diff main...<branch>`), check tests ran, then `atm merge <branch>` (runs the suite, fast-forwards
-   main, closes the ticket). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
+   (`git diff main...<branch>`), check tests ran and obtain a DIFFERENT seat's structured
+   accept at the exact current review head before `atm merge <branch>` (runs the suite and
+   integrates the accepted head). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
    and `atm reopen <id>`. Push main with `git push origin main` after merges.
 3. COORDINATE: `atm dash --once` and `atm util` -- reopen tickets whose owner is silent > 90 min
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
@@ -15531,7 +15782,9 @@ Bring your own agent (any harness, same prompt contract -- docs/byoa.md):
   the next poll. `atm watch` and `atm spawn` share one launch policy:
   unattended (no permission prompts); --safe keeps prompts. The watcher header
   prints launch=unattended or launch=safe.
-  To survive reboot, add the watcher command from `spawn --list`'s log to a login item / launchd job.
+  To survive reboot and parent-session restarts: `atm service install`, then
+  `atm spawn <seat> --persist` (desired state on the board; the per-user service
+  owns the loops). `atm service uninstall` removes the launchd/systemd unit.
 
 Stuck rule (in every worker prompt): if blocked -- permission, failing test, unclear scope, missing
 access, a decision that is not yours -- post `atm msg "stuck: ..." --to <master> --re <id>`
@@ -15852,6 +16105,162 @@ def _stop_file(board, owner):
     return os.path.join(agents_dir(board), owner + ".watch.stop")
 
 
+def _seat_service():
+    """Lazy import so tests can stub the module and wheels stay optional."""
+    import seat_service as mod
+    return mod
+
+
+def _spawn_spec_from_argv(argv, *, worktree, cmd, harness, model, max_runs, safe):
+    """Serializable restart recipe for the per-user seat service (T-1499)."""
+    return {
+        "argv": list(argv),
+        "worktree": worktree,
+        "cmd": cmd,
+        "harness": harness or "",
+        "model": model or "",
+        "max_runs": int(max_runs),
+        "safe": bool(safe),
+    }
+
+
+def _start_watcher_from_spec(board, owner, spec, *, env=None, verify=True):
+    """Start one detached watch process from a recorded spawn spec.
+
+    Caller must hold the seat runner lock and have checked seat_may_spawn.
+    """
+    import subprocess
+
+    argv = list((spec or {}).get("argv") or [])
+    wt = (spec or {}).get("worktree") or ""
+    if not argv or not wt:
+        return False, "incomplete spawn spec (need argv + worktree)", None, ""
+    launch_env = env if env is not None else _supervisor_launch_env(board, owner)
+    launch_env = dict(launch_env)
+    launch_env["PYTHONUNBUFFERED"] = "1"
+    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
+    with open(log_path, "a") as lf:
+        started = subprocess.Popen(
+            argv, cwd=wt, env=launch_env, stdout=lf, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    started_pid = started.pid
+    if not verify:
+        return True, "", started_pid, " ".join(argv)
+    ok, verify_detail, pid, started_cmd = _spawn_verify_started_watcher(
+        board, owner, started_pid)
+    if not ok:
+        import signal
+        try:
+            os.kill(started_pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+        return False, verify_detail, started_pid, started_cmd or " ".join(argv)
+    return True, "", pid, started_cmd
+
+
+def _service_launch_env(board, owner, home=None):
+    """Supervisor launch env overlaid with the service's login-shell snapshot."""
+    ss = _seat_service()
+    base = _supervisor_launch_env(board, owner)
+    return ss.merge_launch_env(base, ss.load_login_env(home))
+
+
+def _record_desired_active(board, owner, spec, *, who=""):
+    ss = _seat_service()
+    ss.register_board(board)
+    return ss.save_desired(
+        board, owner, "active", spec=spec, backoff_until=None,
+        start_failures=0, updated_by=who or whoami())
+
+
+def _record_desired_stopped(board, owner, *, who=""):
+    """Mark a persist seat stopped. No-op when no desired sidecar exists."""
+    ss = _seat_service()
+    if not ss.load_desired(board, owner):
+        return None
+    ss.register_board(board)
+    return ss.save_desired(
+        board, owner, "stopped", backoff_until=None,
+        updated_by=who or whoami(), keep_spec=True)
+
+
+def _record_desired_inactive_if_present(board, owner, *, who=""):
+    """Non-persist spawn: clear a prior desired=stopped so reconcile won't kill us."""
+    ss = _seat_service()
+    if not ss.load_desired(board, owner):
+        return None
+    ss.register_board(board)
+    return ss.save_desired(
+        board, owner, "inactive", backoff_until=None,
+        updated_by=who or whoami(), keep_spec=True)
+
+
+def _service_try_start_seat(board, owner, desired=None, home=None):
+    """Start one seat when the deterministic rule allows. Returns a status dict."""
+    ss = _seat_service()
+    desired = desired or ss.load_desired(board, owner)
+    if not desired:
+        return {"started": False, "reason": "no-desired"}
+    with ss.RunnerLock(board, owner, blocking=False) as lock:
+        if not lock.held:
+            return {"started": False, "reason": "lock-busy"}
+        live = _live_watch_pids(owner, board=board)
+        if not ss.seat_may_spawn(desired, len(live)):
+            if live:
+                return {"started": False, "reason": "already-live", "pids": live}
+            return {"started": False, "reason": "not-eligible"}
+        try:
+            os.unlink(_stop_file(board, owner))
+        except OSError:
+            pass
+        _reclaim_unrelated_watch_pidfile(board, owner)
+        env = _service_launch_env(board, owner, home=home)
+        ok, detail, pid, cmdline = _start_watcher_from_spec(
+            board, owner, desired.get("spec") or {}, env=env)
+        if not ok:
+            ss.set_backoff(board, owner)
+            return {"started": False, "reason": "start-failed", "detail": detail}
+        ss.clear_backoff(board, owner)
+        return {"started": True, "pid": pid, "cmdline": cmdline}
+
+
+def _service_reconcile_once(home=None, boards=None):
+    """One reconcile pass: stop stopped seats, start eligible active seats."""
+    ss = _seat_service()
+    home_root = home if home is not None else os.path.expanduser("~")
+    targets = boards if boards is not None else ss.load_boards(home_root)
+    report = {"boards": 0, "started": [], "stopped": [], "skipped": [], "errors": []}
+    for board in targets:
+        if not os.path.isdir(board):
+            continue
+        report["boards"] += 1
+        for owner, desired in ss.list_desired_seats(board):
+            try:
+                live = _live_watch_pids(owner, board=board)
+                if ss.seat_should_stop(desired, len(live)):
+                    _spawn_stop(board, owner, all_boards=False)
+                    # _spawn_stop already records stopped; ensure state sticks
+                    ss.save_desired(
+                        board, owner, "stopped", keep_spec=True,
+                        updated_by="service")
+                    report["stopped"].append("%s:%s" % (board, owner))
+                    continue
+                if desired.get("state") != "active":
+                    report["skipped"].append("%s:%s:%s" % (board, owner, desired.get("state")))
+                    continue
+                result = _service_try_start_seat(
+                    board, owner, desired=desired, home=home_root)
+                if result.get("started"):
+                    report["started"].append("%s:%s:pid=%s" % (
+                        board, owner, result.get("pid")))
+                else:
+                    report["skipped"].append("%s:%s:%s" % (
+                        board, owner, result.get("reason")))
+            except Exception as exc:
+                report["errors"].append("%s:%s:%s" % (board, owner, exc))
+    return report
+
+
 def _spawn_stop(board, owner, all_boards=False):
     """`atm spawn <owner> --stop`: stop that seat's watcher ON THIS BOARD.
 
@@ -15866,6 +16275,15 @@ def _spawn_stop(board, owner, all_boards=False):
     `all_boards` is the separate, explicit fleet intent; it is never implied.
     """
     import signal
+
+    # T-1499: desired=stopped only when a persist sidecar already exists.
+    # Non-persist seats never write desired state; writing stopped for every
+    # --stop made a later max-runs>0 spawn look "stopped" to reconcile, which
+    # then killed the live runner.
+    try:
+        _record_desired_stopped(board, owner)
+    except Exception:
+        pass
 
     with _shared_watch_table():
         pids = _live_watch_pids(owner) if all_boards else _live_watch_pids(owner, board=board)
@@ -16157,31 +16575,65 @@ def cmd_spawn(a, board):
     # the launched process has a brand-new session id with no record of
     # its own yet -- otherwise a worker would be hidden from the very
     # mail it was launched to handle.
-    env = _supervisor_launch_env(board, owner)
-    env["PYTHONUNBUFFERED"] = "1"
-    log_path = os.path.join(agents_dir(board), owner + ".watch.log")
-    with open(log_path, "a") as lf:
-        started = subprocess.Popen(argv, cwd=wt, env=env, stdout=lf, stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL, start_new_session=True)
-    started_pid = started.pid
-    ok, verify_detail, pid, started_cmd = _spawn_verify_started_watcher(
-        board, owner, started_pid)
-    if not ok:
-        import signal
-        try:
-            os.kill(started_pid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            pass
-        sys.exit("failure: spawn did not install a live watcher for %s "
-                 "(started pid %d). %s" % (owner, started_pid, verify_detail))
     model = a.model or load_workforce(board).get(owner, {}).get("model") or "default"
+    # Desired state is owned by explicit --persist only (not max_runs==0 from
+    # continuous wake). Non-persist must inactivate any prior sidecar so
+    # reconcile cannot kill a live finite-run watcher.
+    explicit_persist = bool(getattr(a, "persist", False))
+    spec = _spawn_spec_from_argv(
+        argv, worktree=wt, cmd=cmd, harness=harness, model=model,
+        max_runs=max_runs, safe=bool(getattr(a, "safe", False)))
+    if explicit_persist:
+        _record_desired_active(board, owner, spec)
+    else:
+        _record_desired_inactive_if_present(board, owner)
+    ss = _seat_service()
+    service_home = os.environ.get("ATMAN_SERVICE_HOME") or os.path.expanduser("~")
+    service_owns = explicit_persist and ss.service_installed(service_home) and not os.environ.get(
+        "ATMAN_SPAWN_DIRECT")
+    if service_owns:
+        result = _service_try_start_seat(board, owner, home=service_home)
+        if result.get("started"):
+            pid = result["pid"]
+            print("desired=active for %s; service started watcher (pid %d); "
+                  "harness=%s; model=%s; wake=%s; launch=%s; persist=yes; max-runs=%s; "
+                  "run-timeout=%sm; seat=%s pinned; log %s" % (
+                      owner, pid,
+                      _launch_harness_label(
+                          board, owner, getattr(a, "harness", "") or a.tool, harness),
+                      model, effective_wake_mode, launch, max_runs,
+                      getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner,
+                      os.path.join(agents_dir(board), owner + ".watch.log")))
+            print("cmd: %s" % cmd)
+            print("watch-cmdline: %s" % (result.get("cmdline") or ""))
+        else:
+            print("desired=active for %s recorded; service will start the watcher "
+                  "(%s). active-with-no-process is wakeable, not an error."
+                  % (owner, result.get("reason") or "pending"))
+            print("cmd: %s" % cmd)
+        if getattr(a, "usage_line", True):
+            print_seat_usage(board, harness)
+        post_message(board, whoami(),
+                     "%s desired=active (service-owned persistent worker, %s, model %s)"
+                     % (owner, harness, model))
+        return
+    env = _supervisor_launch_env(board, owner)
+    ok, verify_detail, pid, started_cmd = _start_watcher_from_spec(
+        board, owner, spec, env=env)
+    if not ok:
+        sys.exit("failure: spawn did not install a live watcher for %s "
+                 "(started pid %s). %s" % (owner, pid, verify_detail))
     print("watcher for %s started (pid %d); harness=%s; model=%s; wake=%s; launch=%s; persist=%s; max-runs=%s; run-timeout=%sm; seat=%s pinned; log %s" % (
         owner, pid, _launch_harness_label(
             board, owner, getattr(a, "harness", "") or a.tool, harness), model,
         effective_wake_mode, launch, "yes" if max_runs == 0 else "no", max_runs,
-        getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner, log_path))
+        getattr(a, "run_timeout", DEFAULT_RUN_TIMEOUT_MIN), owner,
+        os.path.join(agents_dir(board), owner + ".watch.log")))
     print("cmd: %s" % cmd)
     print("watch-cmdline: %s" % started_cmd)
+    if explicit_persist and not ss.service_installed(service_home):
+        print("note: install `atm service install` so seats survive parent-session "
+              "restarts and reboot (desired=active already recorded)")
     # T-1076: what this seat's provider has left, from the recorded reading.
     # `dispatch` printed it next to its own reservation line, so it asks for
     # this one to be left out rather than say the same thing twice.
@@ -16189,6 +16641,77 @@ def cmd_spawn(a, board):
         print_seat_usage(board, harness)
     post_message(board, whoami(), "%s spawned as a persistent worker (%s, model %s); it wakes whenever the board has work for it"
                  % (owner, harness, model))
+
+
+def cmd_service(a, board=None):
+    """Per-user OS service that owns persistent seat watchers (T-1499)."""
+    ss = _seat_service()
+    home = os.environ.get("ATMAN_SERVICE_HOME") or os.path.expanduser("~")
+    # Tests redirect the service home via ATMAN_SERVICE_HOME as the fake $HOME root.
+    if os.environ.get("ATMAN_SERVICE_HOME"):
+        home = os.environ["ATMAN_SERVICE_HOME"]
+    action = getattr(a, "service_cmd", None) or getattr(a, "action", None) or "status"
+    py, script = ss.tickets_argv(os.path.realpath(__file__))
+
+    if action == "install":
+        path, err = ss.install_service(
+            py, script, home=home, load=not getattr(a, "no_load", False))
+        if err:
+            sys.exit("service install wrote %s but failed to load: %s" % (path, err))
+        print("installed seat service at %s" % path)
+        print("login-shell env captured at %s" % ss.env_snapshot_path(home))
+        print("reconcile interval %ss; spawn --persist records desired=active"
+              % ss.RECONCILE_INTERVAL_SECS)
+        return
+
+    if action == "uninstall":
+        err = ss.uninstall_service(home=home, unload=not getattr(a, "no_load", False))
+        if err:
+            print("warning: %s" % err)
+        print("uninstalled seat service")
+        return
+
+    if action == "status":
+        boards = ss.load_boards(home)
+        print("installed: %s" % ("yes" if ss.service_installed(home) else "no"))
+        print("home: %s" % ss.service_home(home))
+        print("boards: %d" % len(boards))
+        for b in boards:
+            print("  %s" % b)
+            for owner, desired in ss.list_desired_seats(b):
+                live = _live_watch_pids(owner, board=b) if os.path.isdir(b) else []
+                print("    %s desired=%s live=%d may_spawn=%s" % (
+                    owner, desired.get("state"), len(live),
+                    ss.seat_may_spawn(desired, len(live))))
+        return
+
+    if action == "reconcile":
+        report = _service_reconcile_once(home=home)
+        print("reconciled boards=%d started=%d stopped=%d skipped=%d errors=%d" % (
+            report["boards"], len(report["started"]), len(report["stopped"]),
+            len(report["skipped"]), len(report["errors"])))
+        for line in report["started"]:
+            print("started %s" % line)
+        for line in report["stopped"]:
+            print("stopped %s" % line)
+        for line in report["errors"]:
+            print("error %s" % line)
+        return
+
+    if action == "run":
+        import time as _time
+        # Capture/refresh login env once at boot (launchd bare PATH).
+        ss.save_login_env(ss.capture_login_env(), home=home)
+        print("seat service running; reconcile every %ss; home=%s"
+              % (ss.RECONCILE_INTERVAL_SECS, ss.service_home(home)), flush=True)
+        while True:
+            try:
+                _service_reconcile_once(home=home)
+            except Exception as exc:
+                print("reconcile error: %s" % exc, flush=True)
+            _time.sleep(ss.RECONCILE_INTERVAL_SECS)
+
+    sys.exit("unknown service action: %s" % action)
 
 
 HARNESS_PROBE_PROMPT = "reply OK"
@@ -18718,7 +19241,8 @@ def _next_step_hint(board, tickets, done_ids, health_items=None):
     review = [t for t in tickets if t.get("status") == "review"]
     if review:
         return {"kind": "merge", "label": "Review queue",
-                "message": "%d ticket(s) at a reviewable SHA — human review is the gate." % len(review),
+                "message": "%d ticket(s) at a reviewable SHA — a DIFFERENT seat must "
+                           "accept each exact head before it can be merged." % len(review),
                 "cmd": "atm merge"}
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
@@ -22557,6 +23081,15 @@ dependency tree with each node's status and owner.
     atm master                             # briefing + health
     atm inbox                              # messages addressed to you
 
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
+
 **Rules for every agent**
 
 1. Claim before you work (`atm next`). Never work without a ticket; never
@@ -22566,15 +23099,15 @@ dependency tree with each node's status and owner.
 3. You may create, split, re-wire and assign tickets. Extending the graph is
    expected. Anyone can become master with `atm master take`.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `atm review` and `atm done` refuse from main or with uncommitted files.
+   `atm review` refuses from main or with uncommitted files; run `atm sync` first.
 5. Post `atm update <id> "..."` at least every 45 minutes and at every
    milestone. Longer silence is treated as a timeout and the ticket may be
    reopened for someone else.
 6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
-   automatically; `--pr N` if you opened one). Another seat then reviews it and
-   records `atm accept <id> --sha <exact sha>`; that accept -- not `atm done` --
-   is what releases the dependents. Claim your next ticket right away.
+   automatically; `--pr N` if you opened one). Follow the accept gate above.
+   The integrator may merge only the independently accepted review head.
+   Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
@@ -22618,8 +23151,8 @@ reference a `key` from the same plan or an existing `T-` id:
 
 Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
 finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
-(`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
-their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
+(`atm accept <id> --sha <full 40-char review head>`), so nobody -- human or
+agent -- can release their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
@@ -23103,6 +23636,8 @@ def main():
     c.add_argument("--in-sprint", action="store_true", help="tag with the active sprint")
     c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
     c.add_argument("--worktree", default="", help="implementation checkout; adds automated cleanup child")
+    c.add_argument("--target-repo", default="",
+                   help="repository the deliverable lives in; default: this checkout's origin")
     c.set_defaults(fn=cmd_create)
 
     c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
@@ -23112,6 +23647,8 @@ def main():
     c.add_argument("--role", default=None)
     c.add_argument("--owner", default=None, help="hard-assign (claims on their behalf)")
     c.add_argument("--needs", default=None)
+    c.add_argument("--target-repo", default=None,
+                   help="repository the deliverable lives in; '-' clears it")
     c.add_argument("--priority", type=int, default=None)
     c.add_argument("--title", default="")
     c.add_argument("--by", default="")
@@ -23480,6 +24017,21 @@ def main():
                    help="audited handover when this name's provider/session/runner identity changes; "
                         "strips auth, endpoint, session, ticket pointer, and limits; keeps message history")
     c.set_defaults(fn=cmd_spawn)
+
+    c = sub.add_parser(
+        "service",
+        help="per-user OS service that owns persistent seat watchers (T-1499)")
+    sc = c.add_subparsers(dest="service_cmd")
+    x = sc.add_parser("install", help="install launchd KeepAlive / systemd --user Restart=always")
+    x.add_argument("--no-load", action="store_true",
+                   help="write unit files only; do not launchctl/systemctl load")
+    x = sc.add_parser("uninstall", help="unload and remove the OS unit")
+    x.add_argument("--no-load", action="store_true",
+                   help="remove unit files only; do not unload")
+    sc.add_parser("status", help="show install state, boards, desired seats")
+    sc.add_parser("reconcile", help="one reconcile pass (start/stop due seats)")
+    sc.add_parser("run", help="reconcile loop (what launchd/systemd execs)")
+    c.set_defaults(fn=cmd_service, service_cmd="status")
 
     c = sub.add_parser("ui", help="local command board: http://localhost:8765 (auto-refresh + composer)")
     c.add_argument("--port", type=int, default=8765)
@@ -24001,9 +24553,10 @@ def main():
             found = None
         cmd_self(a, found if found and os.path.isdir(found) else None)
         return
-    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow"):
+    if a.cmd in ("doctor", "board-link", "board-mark-primary", "board-archive-shadow", "service"):
         # Diagnose/repair board resolution itself; must not go through
         # board_dir() or a shadow board is refused before we can report it.
+        # service is per-user (no board required).
         a.fn(a)
         return
     if a.cmd == "feedback":
