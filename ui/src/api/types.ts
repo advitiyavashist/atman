@@ -224,6 +224,8 @@ export interface PlanNode {
   unverified: boolean;
   /** true only for done with a structured accept or merge record bound to the review head. */
   accepted: boolean;
+  /** done with a short-sha accept counted as verified but not bound to the review head (T-1481). */
+  legacy_accept?: boolean;
   /** dependents may start (accept, merge, or a recorded release override). */
   released: boolean;
   blockers: Blocker[];
@@ -304,6 +306,7 @@ export interface Ticket {
   status: string;
   status_label: string;
   accepted: boolean;
+  legacy_accept?: boolean;
   released: boolean;
   owner: string;
   owner_at_project: string;

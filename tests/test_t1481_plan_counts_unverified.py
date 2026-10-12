@@ -2,13 +2,14 @@
 
 Found in the #298 review: after ``done --force`` then ``accept --sha``, the
 counts row said ``0 done unverified`` while the node in the same plan read
-``done, not accepted``. ``review_of()["verified"]`` counted any accept event
-that matched the artifact, even one not bound to ``review_head``, so
-``node.unverified`` stayed false and ``blockers_of`` never named the gap.
+``done, not accepted``. ``review_of()["verified"]`` counts an accept event
+that matches the artifact even when it is not bound to ``review_head``.
 
-An accept counts only when bound to the review head (``structured_accept``).
-Also: the summary's next owner is ``none yet`` rather than ``@?`` (UI), and
-the gate note says reopen, because re-accepting does not bind.
+CEO decision: keep that (legacy short-sha accepts stay verified, off the
+active graph) and make the LABEL agree: such a node or ticket reads
+``done, accepted (legacy short sha)``. It is still not ``structured_accept``,
+so dependents stay gated. Also: the summary's next owner is ``none yet``
+rather than ``@?`` (UI).
 """
 from __future__ import annotations
 
@@ -67,8 +68,8 @@ def _node(plan, tid):
     return next(n for n in plan["nodes"] if n["id"] == tid)
 
 
-def test_short_sha_accept_without_review_head_is_unverified(tmp_path):
-    """A 7-char accept event that matches the commit is not verification."""
+def test_short_sha_accept_without_review_head_is_labelled_legacy(tmp_path):
+    """A 7-char accept event that matches the commit counts, and says it is legacy."""
     board = _board(tmp_path, ("T-001", "Write CSV statistics", dict(
         status="done", owner="alice", commit=FULL,
         review_events=[{"kind": "accept", "by": "bob", "at": stamp(5), "sha": FULL[:7], "notes": "ok"}],
@@ -77,31 +78,32 @@ def test_short_sha_accept_without_review_head_is_unverified(tmp_path):
     assert not t.get("review_head")
     review = wv.review_of(t)
     assert review["latest"] and review["latest"]["kind"] == "ACCEPT"
-    assert review["latest"]["applies"] == "exact", "the label may still name the accept"
-    assert review["verified"] is False, "verified must agree with structured_accept"
+    assert review["verified"] is True, "main's _review_verified is kept"
     assert wv.structured_accept(t) is False
-    assert "T-001" in wv.unverified_done_ids([t])
+    assert wv.legacy_accept(t) is True
+    assert "T-001" not in wv.unverified_done_ids([t])
 
     plan = tk.ui_plan(str(board), "normal")
     node = _node(plan, "T-001")
     assert node["phase"] == "done"
-    assert node["unverified"] is True
+    assert node["unverified"] is False
     assert node["accepted"] is False
-    assert node["status_label"] == "done, not accepted"
+    assert node["legacy_accept"] is True
+    assert node["status_label"] == "done, accepted (legacy short sha)"
     assert plan["counts"]["done"] == 1
-    assert plan["counts"]["done_unverified"] == 1, plan["counts"]
-    kinds = [b["kind"] for b in node["blockers"]]
-    assert kinds == ["unaccepted"], node["blockers"]
-    assert "not bound to a review head" in node["blockers"][0]["text"]
-    assert "@bob" in node["blockers"][0]["text"]
-    assert "atm reopen T-001" in node["blockers"][0]["cmd"]
-    # The dependent names the same gap, with the same reopen path.
+    assert plan["counts"]["done_unverified"] == 0, plan["counts"]
+    assert node["blockers"] == []
+    # Not bound to a head, so the dependent is still gated and says why.
     child = _node(plan, "T-002")
     assert [b["kind"] for b in child["blockers"]] == ["dep_unaccepted"]
-    assert child["blockers"][0]["cmd"] == node["blockers"][0]["cmd"]
+    assert "not bound to a review head" in child["blockers"][0]["text"]
+    assert "atm reopen T-001" in child["blockers"][0]["cmd"]
+    tv = tk.ui_ticket(str(board), "T-001", "boss", "normal")
+    assert tv["legacy_accept"] is True and tv["accepted"] is False
+    assert tv["status_label"] == node["status_label"]
 
 
-def test_done_force_then_accept_via_real_cli_counts_as_unverified(tmp_path):
+def test_done_force_then_accept_via_real_cli_label_agrees_with_counts(tmp_path):
     """CLI-seeded repro: done --force then accept --sha leaves no review_head."""
     board = _board(tmp_path, ("T-001", "Write CSV statistics", {}),
                    ("T-002", "Consume statistics", dict(deps=["T-001"])))
@@ -109,7 +111,7 @@ def test_done_force_then_accept_via_real_cli_counts_as_unverified(tmp_path):
     assert len(head) == 40
     for agent, args in (("alice", ("claim", "T-001")),
                         ("alice", ("done", "T-001", "--force", "--notes", "shipped")),
-                        ("bob", ("accept", "T-001", "--sha", head, "--notes", "ok"))):
+                        ("bob", ("accept", "T-001", "--sha", head[:7], "--notes", "ok"))):
         r = _cli(board, agent, *args)
         assert r.returncode == 0, r.stdout + r.stderr
     raw = json.loads((board / "T-001.json").read_text())
@@ -118,22 +120,15 @@ def test_done_force_then_accept_via_real_cli_counts_as_unverified(tmp_path):
     plan = tk.ui_plan(str(board), "normal")
     node = _node(plan, "T-001")
     tv = tk.ui_ticket(str(board), "T-001", "boss", "normal")
-    assert tv["accepted"] is False
-    assert tv["status_label"] == "done, not accepted"
-    assert node["unverified"] is True, "node and ticket view must agree"
-    assert node["status_label"] == tv["status_label"]
-    assert plan["counts"]["done_unverified"] == 1, plan["counts"]
-    assert plan["counts"]["done"] == 1
-    assert [b["kind"] for b in node["blockers"]] == ["unaccepted"]
-    assert "accept by @bob on %s is not bound to a review head" % head[:7] in node["blockers"][0]["text"]
-    # The dependent's block note tells the operator to reopen, not to accept again.
-    child = json.loads((board / "T-002.json").read_text())
-    gate = [n.get("text") or "" for n in child.get("notes") or [] if "without verification" in (n.get("text") or "")]
-    assert gate, child.get("notes")
-    assert gate[-1] == wv.unverified_block_reason("T-001")
-    assert "reopen" in gate[-1] and "accept it" not in gate[-1]
+    unverified = plan["counts"]["done_unverified"]
+    # The invariant: a node is labelled "not accepted" exactly when it is counted unverified.
+    assert (node["status_label"] == "done, not accepted") == bool(node["unverified"])
+    assert unverified == sum(1 for n in plan["nodes"] if n["status_label"] == "done, not accepted")
+    assert node["unverified"] is False and unverified == 0, plan["counts"]
+    assert node["status_label"] == tv["status_label"] == "done, accepted (legacy short sha)"
+    assert tv["accepted"] is False and tv["review"]["verified"] is True
 
-    # The suggested path binds a head and the counts follow.
+    # Binding a head turns it into a plain accept.
     for agent, args in (("bob", ("reopen", "T-001", "--notes", "bind a review head")),
                         ("alice", ("claim", "T-001")),
                         ("alice", ("review", "T-001", "--force", "--notes", "paths"))):
@@ -143,13 +138,19 @@ def test_done_force_then_accept_via_real_cli_counts_as_unverified(tmp_path):
     r = _cli(board, "bob", "accept", "T-001", "--sha", new_head, "--notes", "bound")
     assert r.returncode == 0, r.stdout + r.stderr
     raw3 = json.loads((board / "T-001.json").read_text())
-    assert wv.structured_accept(raw3)
-    assert wv.review_of(raw3)["verified"] is True
-    plan2 = tk.ui_plan(str(board), "normal")
-    node2 = _node(plan2, "T-001")
-    assert node2["unverified"] is False and not node2["blockers"]
-    assert plan2["counts"]["done_unverified"] == 0
-    assert tk.ui_ticket(str(board), "T-001", "boss", "normal")["review"]["verified"] is True
+    assert wv.structured_accept(raw3) and not wv.legacy_accept(raw3)
+    node2 = _node(tk.ui_plan(str(board), "normal"), "T-001")
+    assert node2["accepted"] is True and node2["legacy_accept"] is False
+    assert node2["status_label"] == "done, accepted"
+
+
+def test_done_without_any_accept_stays_not_accepted_and_unverified(tmp_path):
+    board = _board(tmp_path, ("T-001", "Write CSV statistics", dict(status="done", owner="alice", commit=FULL)))
+    plan = tk.ui_plan(str(board), "normal")
+    node = _node(plan, "T-001")
+    assert node["unverified"] is True and node["legacy_accept"] is False
+    assert node["status_label"] == "done, not accepted"
+    assert plan["counts"]["done_unverified"] == 1
 
 
 def test_next_owner_is_empty_when_nobody_is_reserved(tmp_path):
@@ -161,18 +162,3 @@ def test_next_owner_is_empty_when_nobody_is_reserved(tmp_path):
     assert nxt and nxt["id"] == "T-001"
     assert nxt["who"] == "" and nxt["who_kind"] == ""
     assert "?" not in json.dumps(nxt)
-
-
-def test_gate_note_says_reopen_and_legacy_wording_still_recognised():
-    reason = wv.unverified_block_reason("T-002")
-    assert reason.endswith("reopen it, then review and accept")
-    assert "accept it or reopen" not in reason
-    legacy = "T-002 marked done without verification; accept it or reopen"
-    for text in (reason, legacy):
-        assert wv.is_live_unverified_gate_note(text, "T-002") is True
-        assert wv.is_live_unverified_gate_note(text) is True
-        assert wv.is_live_unverified_gate_note("resolved: " + text, "T-002") is False
-    child = {"notes": [{"by": "boss", "text": legacy}, {"by": "boss", "text": reason},
-                       {"by": "alice", "text": "unrelated"}]}
-    wv.drop_unverified_gate_notes(child, "T-002")
-    assert [n["text"] for n in child["notes"]] == ["unrelated"]

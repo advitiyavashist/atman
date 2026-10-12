@@ -130,6 +130,22 @@ describe("accepted is only ever an accept", () => {
     expect(state.label).not.toContain("done, accepted");
   });
 
+  it("labels a legacy short-sha accept the way the counts treat it (T-1481)", () => {
+    const n = node({
+      status: "done",
+      accepted: false,
+      released: false,
+      unverified: false,
+      legacy_accept: true,
+      status_label: "done, accepted (legacy short sha)",
+    });
+    const state = acceptState(n);
+    expect(state.label).toBe("done, accepted (legacy short sha)");
+    expect(state.label).not.toBe("done, not accepted");
+    expect(state.accepted).toBe(false);
+    expect(state.corrected).toBeUndefined();
+  });
+
   it("says a release override is not an accept", () => {
     const n = node({
       status: "done",

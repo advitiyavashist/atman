@@ -59,10 +59,15 @@ export function acceptState(rec: {
   accepted: boolean;
   released?: boolean;
   unverified?: boolean;
+  legacy_accept?: boolean;
 }): AcceptState {
   const given = (rec.status_label || "").trim();
   const done = rec.status === "done";
   if (rec.accepted) return { label: "done, accepted", tone: "accepted", accepted: true };
+  // T-1481: a short-sha accept the counts treat as verified; not bound to a head.
+  if (done && rec.legacy_accept) {
+    return { label: "done, accepted (legacy short sha)", tone: "accepted", accepted: false };
+  }
   if (done && rec.released) {
     return { label: "done, released by override (not accepted)", tone: "override", accepted: false };
   }
