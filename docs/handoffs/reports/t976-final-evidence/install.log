@@ -1,0 +1,38 @@
+Development install: use --live-release --ref <sha> for the shared live CLI.
+linked /tmp/atman-t976-0923-bin/atm -> /private/tmp/atman-t976-0923-source/tickets.py (primary)
+linked /tmp/atman-t976-0923-bin/tickets -> /private/tmp/atman-t976-0923-source/tickets.py (compatibility alias)
+add /tmp/atman-t976-0923-bin to your PATH
+building the local app (ui/dist)...
+npm warn deprecated whatwg-encoding@3.1.1: Use @exodus/bytes instead for a more spec-conformant and faster implementation
+
+added 232 packages, and audited 234 packages in 3s
+
+31 packages are looking for funding
+  run `npm fund` for details
+
+5 vulnerabilities (3 moderate, 1 high, 1 critical)
+
+To address all issues (including breaking changes), run:
+  npm audit fix --force
+
+Run `npm audit` for details.
+npm notice
+npm notice New minor version of npm available! 11.5.1 -> 11.20.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.20.0
+npm notice To update run: npm install -g npm@11.20.0
+npm notice
+
+> atman-app@0.1.0 build
+> tsc -b && vite build
+
+vite v5.4.21 building for production...
+transforming...
+✓ 311 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   1.45 kB │ gzip:  0.81 kB
+dist/assets/index-CBXQsGPF.css   10.97 kB │ gzip:  2.94 kB
+dist/assets/index-3CHZrB6P.js   189.64 kB │ gzip: 59.53 kB
+✓ built in 527ms
+built /private/tmp/atman-t976-0923-source/ui/dist
+now: cd <your project> && atm --help   # tickets is the same command

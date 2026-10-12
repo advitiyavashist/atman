@@ -1,0 +1,318 @@
+"""T-1499: per-user seat service owns persistent watchers.
+
+spawn --persist records desired state; reconcile restarts dead runners;
+concurrent starts cannot double a seat; service install captures login env.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import signal
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+from test_wakeup import TOOL, board, run  # noqa: F401
+
+
+def _tickets():
+    spec = importlib.util.spec_from_file_location("tickets_t1499", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _seat_service():
+    path = TOOL.parent / "seat_service.py"
+    spec = importlib.util.spec_from_file_location("seat_service_t1499", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _live(board_path, owner):
+    tk = _tickets()
+    return tk._live_watch_pids(owner, board=str(board_path))
+
+
+def _wait_live(board_path, owner, timeout=8.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pids = _live(board_path, owner)
+        if pids:
+            return pids
+        time.sleep(0.1)
+    return []
+
+
+def _wait_gone(board_path, owner, timeout=8.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _live(board_path, owner):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.fixture
+def service_home(tmp_path, monkeypatch):
+    home = tmp_path / "svc-home"
+    home.mkdir()
+    monkeypatch.setenv("ATMAN_SERVICE_HOME", str(home))
+    monkeypatch.delenv("ATMAN_SPAWN_DIRECT", raising=False)
+    return home
+
+
+def test_seat_may_spawn_rule_is_deterministic():
+    ss = _seat_service()
+    active = {"state": "active", "backoff_until": None}
+    assert ss.seat_may_spawn(active, 0) is True
+    assert ss.seat_may_spawn(active, 1) is False
+    assert ss.seat_may_spawn({"state": "stopped"}, 0) is False
+    assert ss.seat_may_spawn({"state": "inactive"}, 0) is False
+    future = time.time() + 60
+    assert ss.seat_may_spawn({"state": "active", "backoff_until": future}, 0) is False
+    past = time.time() - 5
+    assert ss.seat_may_spawn({"state": "active", "backoff_until": past}, 0) is True
+
+
+def test_backoff_seconds_grows_to_30():
+    ss = _seat_service()
+    assert ss.backoff_seconds(1) == 1
+    assert ss.backoff_seconds(2) == 2
+    assert ss.backoff_seconds(3) == 4
+    assert ss.backoff_seconds(5) == 16
+    assert ss.backoff_seconds(6) == 30
+    assert ss.backoff_seconds(20) == 30
+
+
+def test_spawn_persist_records_desired_without_service(board, service_home):
+    run(board, "join", "doc", "--roles", "docs")
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist",
+            agent="master")
+    assert r.returncode == 0, r.stderr
+    assert "watcher for doc started" in r.stdout
+    desired = json.loads((board / "agents" / "doc.desired").read_text())
+    assert desired["state"] == "active"
+    assert desired["spec"]["worktree"]
+    assert desired["spec"]["argv"]
+    assert "atm service install" in r.stdout
+    run(board, "spawn", "doc", "--stop", agent="master")
+    stopped = json.loads((board / "agents" / "doc.desired").read_text())
+    assert stopped["state"] == "stopped"
+
+
+def test_nonpersist_spawn_after_stop_survives_reconcile(board, service_home):
+    """Reject blocker: stop must not leave desired=stopped that kills max-runs>0."""
+    ss = _seat_service()
+    ss.mark_installed(str(service_home))
+    run(board, "join", "doc", "--roles", "docs")
+    env = {"ATMAN_SERVICE_HOME": str(service_home)}
+    r = run(board, "spawn", "doc", "--exec", "sleep 30", "--every", "5", "--max-runs", "3",
+            agent="master", env=env)
+    assert r.returncode == 0, r.stderr
+    assert not (board / "agents" / "doc.desired").exists()
+    pids = _wait_live(board, "doc")
+    assert pids
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+    assert _wait_gone(board, "doc")
+    assert not (board / "agents" / "doc.desired").exists()
+    r2 = run(board, "spawn", "doc", "--exec", "sleep 30", "--every", "5", "--max-runs", "3",
+             agent="master", env=env)
+    assert r2.returncode == 0, r2.stderr
+    live = _wait_live(board, "doc")
+    assert live
+    r3 = run(board, "service", "reconcile", agent="master", env=env)
+    assert r3.returncode == 0, r3.stderr
+    assert _live(board, "doc"), "reconcile must not kill non-persist runner: %s" % r3.stdout
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+
+
+def test_nonpersist_inactivates_prior_persist_desired(board, service_home):
+    ss = _seat_service()
+    ss.mark_installed(str(service_home))
+    run(board, "join", "doc", "--roles", "docs")
+    env = {"ATMAN_SERVICE_HOME": str(service_home)}
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist",
+            agent="master", env=env)
+    assert r.returncode == 0, r.stderr
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+    stopped = json.loads((board / "agents" / "doc.desired").read_text())
+    assert stopped["state"] == "stopped"
+    r2 = run(board, "spawn", "doc", "--exec", "sleep 30", "--every", "5", "--max-runs", "3",
+             agent="master", env=env)
+    assert r2.returncode == 0, r2.stderr
+    desired = json.loads((board / "agents" / "doc.desired").read_text())
+    assert desired["state"] == "inactive"
+    live = _wait_live(board, "doc")
+    assert live
+    r3 = run(board, "service", "reconcile", agent="master", env=env)
+    assert r3.returncode == 0, r3.stderr
+    assert _live(board, "doc"), r3.stdout
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+
+
+def test_service_install_writes_unit_and_login_env(board, service_home):
+    ss = _seat_service()
+    r = run(board, "service", "install", "--no-load", agent="master",
+            env={"ATMAN_SERVICE_HOME": str(service_home)})
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert ss.service_installed(str(service_home))
+    env_path = Path(ss.env_snapshot_path(str(service_home)))
+    assert env_path.is_file()
+    mode = env_path.stat().st_mode & 0o777
+    assert mode == 0o600, oct(mode)
+    snap = json.loads(env_path.read_text())
+    assert "env" in snap and isinstance(snap["env"], dict)
+    for key in snap["env"]:
+        assert not ss._LOGIN_ENV_SECRET_RE.search(key), key
+    plist = Path(ss.plist_path(str(service_home)))
+    marker = Path(ss.service_home(str(service_home))) / "installed"
+    assert plist.is_file() or marker.is_file()
+    r2 = run(board, "service", "uninstall", "--no-load", agent="master",
+             env={"ATMAN_SERVICE_HOME": str(service_home)})
+    assert r2.returncode == 0, r2.stderr
+    assert not ss.service_installed(str(service_home))
+    assert not env_path.exists(), "uninstall must remove login-env.json"
+
+
+def test_login_env_filters_secrets_and_keeps_path(tmp_path):
+    ss = _seat_service()
+    filtered = ss.filter_login_env({
+        "PATH": "/login/bin:/usr/bin",
+        "HOME": "/Users/operator",
+        "ANTHROPIC_API_KEY": "sk-secret",
+        "OPENAI_API_KEY": "sk-other",
+        "CURSOR_API_KEY": "tok",
+        "XDG_CONFIG_HOME": "/Users/operator/.config",
+        "TICKET_AGENT": "ignore",
+    })
+    assert filtered["PATH"].startswith("/login/bin")
+    assert filtered["HOME"] == "/Users/operator"
+    assert filtered["XDG_CONFIG_HOME"].endswith(".config")
+    assert "ANTHROPIC_API_KEY" not in filtered
+    assert "OPENAI_API_KEY" not in filtered
+    assert "CURSOR_API_KEY" not in filtered
+    assert "TICKET_AGENT" not in filtered
+    path = ss.save_login_env(filtered, home=str(tmp_path))
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+
+
+def test_kill_runner_reconcile_restarts(board, service_home):
+    ss = _seat_service()
+    ss.mark_installed(str(service_home))
+    run(board, "join", "doc", "--roles", "docs")
+    env = {"ATMAN_SERVICE_HOME": str(service_home)}
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist",
+            agent="master", env=env)
+    assert r.returncode == 0, r.stderr
+    assert "desired=active" in r.stdout or "watcher for doc started" in r.stdout
+    pids = _wait_live(board, "doc")
+    assert pids, "service-owned spawn should start a runner immediately: %s" % r.stdout
+    os.kill(pids[0], signal.SIGKILL)
+    assert _wait_gone(board, "doc")
+    desired = json.loads((board / "agents" / "doc.desired").read_text())
+    assert desired["state"] == "active"
+    r2 = run(board, "service", "reconcile", agent="master", env=env)
+    assert r2.returncode == 0, r2.stderr
+    restarted = _wait_live(board, "doc")
+    assert restarted, r2.stdout
+    assert restarted[0] != pids[0]
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+
+
+def test_service_restart_restores_active_seats(board, service_home):
+    """Reboot-equivalent: service reconcile with no live runners restores actives."""
+    ss = _seat_service()
+    ss.mark_installed(str(service_home))
+    run(board, "join", "doc", "--roles", "docs")
+    env = {"ATMAN_SERVICE_HOME": str(service_home)}
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist",
+            agent="master", env=env)
+    assert r.returncode == 0, r.stderr
+    pids = _wait_live(board, "doc")
+    assert pids
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    assert _wait_gone(board, "doc")
+    r2 = run(board, "service", "reconcile", agent="master", env=env)
+    assert r2.returncode == 0, r2.stderr
+    assert _wait_live(board, "doc"), r2.stdout
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+
+
+def test_concurrent_start_no_duplicate_runners(board, service_home):
+    tk = _tickets()
+    ss = _seat_service()
+    ss.mark_installed(str(service_home))
+    run(board, "join", "doc", "--roles", "docs")
+    env = {"ATMAN_SERVICE_HOME": str(service_home)}
+    r = run(board, "spawn", "doc", "--exec", "true", "--every", "5", "--persist",
+            agent="master", env=env)
+    assert r.returncode == 0, r.stderr
+    pids = _wait_live(board, "doc")
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    assert _wait_gone(board, "doc")
+
+    results = []
+
+    def once():
+        results.append(tk._service_try_start_seat(
+            str(board), "doc", home=str(service_home)))
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [pool.submit(once) for _ in range(4)]
+        for f in futs:
+            f.result(timeout=15)
+    live = _live(board, "doc")
+    assert len(live) == 1, "concurrent starts must leave exactly one runner: %s %s" % (
+        live, results)
+    started = sum(1 for item in results if item.get("started"))
+    assert started == 1, results
+    run(board, "spawn", "doc", "--stop", agent="master", env=env)
+
+
+def test_merge_launch_env_prefers_login_path():
+    ss = _seat_service()
+    merged = ss.merge_launch_env(
+        {"PATH": "/base/bin", "TICKET_AGENT": "keep"},
+        {"PATH": "/login/bin:/usr/bin", "HOME": "/Users/operator",
+         "ANTHROPIC_API_KEY": "sk-no", "TICKET_AGENT": "ignore"})
+    assert merged["PATH"].startswith("/login/bin")
+    assert "/base/bin" in merged["PATH"]
+    assert merged["TICKET_AGENT"] == "keep"
+    assert merged["HOME"] == "/Users/operator"
+    assert "ANTHROPIC_API_KEY" not in merged
+
+
+def test_render_launchd_has_keepalive():
+    ss = _seat_service()
+    body = ss.render_launchd_plist("/usr/bin/python3", "/tmp/tickets.py", "/tmp/log")
+    assert "KeepAlive" in body
+    assert "RunAtLoad" in body
+    assert "service" in body and "run" in body
+    unit = ss.render_systemd_unit("/usr/bin/python3", "/tmp/tickets.py")
+    assert "Restart=always" in unit
+
+
+def test_live_release_install_ships_seat_service():
+    from pathlib import Path
+    ROOT = Path(__file__).resolve().parents[1]
+    """`install.sh --live-release` copies FILES; spawn imports seat_service (T-1499 final review)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("install_live", ROOT / "scripts" / "install_live.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert "seat_service.py" in mod.FILES
+    for name in mod.FILES:
+        assert (ROOT / name).is_file(), name

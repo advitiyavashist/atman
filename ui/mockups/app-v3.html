@@ -1,0 +1,1013 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>atman · app v3 mockup</title>
+<style>
+/* ---- tokens (docs/design/app-v3.md §8) ---- */
+:root{
+  color-scheme:light;
+  --paper:#f7f7f5; --card:#ffffff; --ink:#1a1a1a; --muted:#6b6b6b; --line:#e4e4e0; --line-strong:#cfcfca;
+  --accent:#2f5bea; --accent-ink:#ffffff; --accent-soft:#e8eefc;
+  --working:#1f8a4c; --needs:#b7791f; --blocked:#c53030; --done:#6b6b6b; --next:#8a8a86;
+  --needs-soft:#fbf3e3; --blocked-soft:#fbeaea; --working-soft:#e6f4ec;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --shadow:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.06);
+}
+@media (prefers-color-scheme:dark){
+  :root{color-scheme:dark;--paper:#121212;--card:#1c1c1c;--ink:#ececea;--muted:#9a9a96;--line:#2a2a28;--line-strong:#3a3a37;
+    --accent:#6f8ff5;--accent-ink:#0e1220;--accent-soft:#1d2540;--needs-soft:#2b2412;--blocked-soft:#2e1818;--working-soft:#132b1d;--done:#9a9a96;--next:#8a8a86}
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.45 var(--sans)}
+button{font:inherit;color:inherit}
+a{color:var(--accent);text-decoration:none}
+code,.mono{font-family:var(--mono);font-size:12.5px}
+.hidden{display:none!important}
+.muted{color:var(--muted)}
+
+/* ---- mockup-only state bar ---- */
+.mock{background:#262626;color:#d8d8d4;font-size:12px;padding:6px 16px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.mock b{color:#fff;letter-spacing:.06em;text-transform:uppercase;font-size:11px;margin-right:6px}
+.mock button{background:transparent;border:1px solid #4a4a4a;color:#d8d8d4;border-radius:6px;padding:2px 8px;cursor:pointer}
+.mock button[aria-pressed=true]{background:#fff;color:#111;border-color:#fff}
+
+/* ---- top bar ---- */
+.top{height:48px;display:flex;align-items:center;gap:16px;padding:0 20px;background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.wordmark{font-weight:700;letter-spacing:-.01em;font-size:15px}
+.project{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-strong);border-radius:8px;padding:4px 10px;background:var(--card);cursor:pointer}
+.project .chev{color:var(--muted);font-size:11px}
+.top .spacer{flex:1}
+.you{color:var(--muted)}
+.you b{color:var(--ink);font-weight:600}
+.readonly{color:var(--needs)}
+.switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;color:var(--muted)}
+.switch i{width:30px;height:18px;border-radius:9px;background:var(--line-strong);position:relative;transition:background .15s}
+.switch i::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:7px;background:#fff;transition:left .15s}
+body.show-details .switch i{background:var(--accent)}
+body.show-details .switch i::after{left:14px}
+body.show-details .switch{color:var(--ink)}
+.details{display:none}
+body.show-details .details{display:block}
+.details.inline{display:none}
+body.show-details .details.inline{display:inline}
+
+/* ---- objective ---- */
+.objective{padding:20px 20px 16px;border-bottom:1px solid var(--line);background:var(--card)}
+.objective .row{max-width:1260px;margin:0 auto;display:flex;gap:24px;align-items:flex-start}
+.objective h1{margin:0;font-size:20px;font-weight:600;line-height:1.3;letter-spacing:-.01em}
+.objective .when{margin:4px 0 0;color:var(--muted)}
+.objective .when.warn{color:var(--needs)}
+.objective .grow{flex:1;min-width:0}
+.progress{min-width:170px;text-align:right}
+.progress .n{font-weight:600}
+.progress .bar{height:4px;background:var(--line);border-radius:2px;margin-top:8px;overflow:hidden}
+.progress .bar i{display:block;height:100%;background:var(--working);border-radius:2px}
+.objective .you-mobile{display:none;color:var(--muted);margin-top:6px}
+
+/* ---- layout ---- */
+.layout{max-width:1260px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:32px;padding:20px 20px 60px}
+.main{max-width:880px;min-width:0}
+.talk{position:sticky;top:68px;align-self:start;background:var(--card);border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 88px)}
+
+/* ---- strip ---- */
+.strip{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);background:var(--card);border-radius:999px;padding:6px 14px 6px 10px;cursor:pointer;font-weight:500}
+.pill i{width:8px;height:8px;border-radius:4px;background:var(--next)}
+.pill.working i{background:var(--working)} .pill.needs i{background:var(--needs)} .pill.blocked i{background:var(--blocked)} .pill.done i{background:var(--done)}
+.pill.zero{color:var(--muted);font-weight:400}
+.pill.zero i{opacity:.35}
+.pill.hot{border-color:var(--needs);background:var(--needs-soft)}
+
+/* ---- presence strip (§5.8) ---- */
+.presence{display:flex;gap:6px 18px;flex-wrap:wrap;align-items:center;margin:0 0 24px 4px;color:var(--muted);font-size:13px}
+.seat{all:unset;display:inline-flex;align-items:center;gap:7px;cursor:pointer;border-radius:6px;padding:2px 4px}
+.seat:hover{background:var(--card);color:var(--ink)}
+.seat b{font-weight:600;color:var(--ink)}
+.seat .doing{max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;flex:none;position:relative;box-sizing:border-box}
+.dot.working{background:var(--working)}
+.dot.idle{border:1.5px solid var(--muted)}
+.dot.offline{border:1.5px solid var(--muted)}
+.dot.offline::after{content:"";position:absolute;left:-2px;top:2.5px;width:11px;height:1.5px;background:var(--muted);transform:rotate(-45deg)}
+.dot.limited{background:var(--needs)}
+.dot.logged-out{border:1.5px solid var(--needs)}
+.dot.unknown{border:1.5px dotted var(--muted)}
+.dot.unknown::after{content:"?";position:absolute;left:0;right:0;top:-1px;font-size:7px;line-height:8px;text-align:center;color:var(--muted);font-weight:700}
+.seat.me{cursor:default}
+.seat.me:hover{background:transparent;color:var(--muted)}
+
+/* ---- sections ---- */
+section{margin-bottom:28px}
+section h2{margin:0 0 10px;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+section h2 span{color:var(--ink)}
+section h2 .fold{all:unset;cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+section h2 .fold::before{content:"▸";font-size:10px;color:var(--muted)}
+section.open h2 .fold::before{content:"▾"}
+section h2 .fold:hover{color:var(--ink)}
+.chips{display:inline-flex;gap:4px;text-transform:none;letter-spacing:0;font-weight:500}
+.chip{all:unset;cursor:pointer;height:24px;padding:0 10px;border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--muted);font-size:12.5px;display:inline-flex;align-items:center;gap:5px}
+.chip[aria-pressed=true]{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+.chip:hover:not([aria-pressed=true]){border-color:var(--line-strong);color:var(--ink)}
+.chip .n{opacity:.7}
+.empty{color:var(--muted);padding:12px 16px;border:1px dashed var(--line-strong);border-radius:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.empty .grow{flex:1 1 240px}
+.cards{display:flex;flex-direction:column;gap:8px}
+
+/* ---- card ---- */
+.card{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--next);border-radius:10px;padding:14px 16px;box-shadow:0 1px 1px rgba(0,0,0,.02);cursor:pointer}
+.card:hover{border-color:var(--line-strong);border-left-color:inherit}
+.card.working{border-left-color:var(--working)} .card.needs{border-left-color:var(--needs)} .card.blocked{border-left-color:var(--blocked)} .card.done{border-left-color:var(--done)}
+.card.working:hover{border-left-color:var(--working)} .card.needs:hover{border-left-color:var(--needs)} .card.blocked:hover{border-left-color:var(--blocked)} .card.done:hover{border-left-color:var(--done)}
+.card .head{display:flex;gap:10px;align-items:baseline}
+.card .id{font-family:var(--mono);font-size:12px;color:var(--muted);flex:none}
+.card .title{font-weight:600;font-size:15px;flex:1;min-width:0}
+.card .open{all:unset;cursor:pointer;color:var(--muted);flex:none;font-size:13px}
+.card .open:hover{color:var(--ink)}
+.card .sentence{margin:6px 0 0;line-height:1.5}
+.card .sentence q{quotes:"“" "”"}
+.card .sub{margin:4px 0 0;color:var(--muted)}
+.actions{display:flex;gap:8px 10px;flex-wrap:wrap;margin-top:12px;align-items:center}
+.card .details{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);color:var(--muted);font-size:12.5px;line-height:1.6}
+.item{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--needs);border-radius:10px;padding:14px 16px}
+.item .who{font-weight:600}
+.item .text{margin:4px 0 0}
+.why{color:var(--needs);font-size:13px}
+.result{display:block;color:var(--muted);font-size:13px;margin-top:12px}
+.result::before{content:"✓";color:var(--working);font-weight:700;margin-right:6px}
+.result code{color:var(--ink)}
+
+/* ---- buttons ---- */
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--line-strong);background:var(--card);cursor:pointer;font-weight:500;white-space:nowrap}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{filter:brightness(.95)}
+.btn.danger{color:var(--blocked);border-color:var(--blocked)}
+.btn.quiet{border-color:transparent;color:var(--muted)}
+.btn.quiet:hover{color:var(--ink);background:var(--paper)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn:disabled:hover{border-color:var(--line-strong);filter:none}
+.btn .sha{font-family:var(--mono);font-weight:400;opacity:.9}
+
+/* ---- ticket badge in chat (§5.9) ---- */
+.badge{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 7px 0 6px;border:1px solid var(--line);border-radius:6px;background:var(--paper);font-size:12px;vertical-align:middle;white-space:nowrap}
+.badge:hover{border-color:var(--line-strong)}
+.badge .id{font-family:var(--mono);color:var(--ink)}
+.badge .st{color:var(--muted)}
+.badge i{width:6px;height:6px;border-radius:3px;background:var(--next)}
+.badge.working i{background:var(--working)} .badge.needs i{background:var(--needs)} .badge.blocked i{background:var(--blocked)} .badge.done i{background:var(--done)}
+
+/* ---- talk ---- */
+.talk .th{padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+.talk .th .label{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.talk .who{display:flex;align-items:center;gap:8px;margin-top:6px}
+.talk .who select{font:inherit;font-weight:600;font-size:15px;border:1px solid transparent;background:transparent;border-radius:6px;padding:2px 4px 2px 0;cursor:pointer;color:var(--ink);max-width:100%}
+.talk .who select:hover{border-color:var(--line-strong)}
+.talk .state{color:var(--muted);margin-top:2px}
+.talk .state.on{color:var(--working)} .talk .state.warn{color:var(--needs)}
+.talk .note{margin:10px 0 0;padding:10px 12px;background:var(--paper);border-radius:8px;color:var(--muted);line-height:1.5}
+.talk .note .btn{margin-top:8px}
+.thread{flex:1;overflow:auto;padding:12px 16px;display:flex;flex-direction:column;gap:14px;min-height:200px}
+.msg .meta{display:flex;gap:8px;align-items:baseline;color:var(--muted);font-size:12.5px}
+.msg .meta b{color:var(--ink);font-weight:600;font-size:13px}
+.msg .body{margin:2px 0 0;white-space:pre-wrap;line-height:1.6}
+.msg.me .body{background:var(--accent-soft);border-radius:8px;padding:8px 10px}
+.msg .re{font-family:var(--mono);font-size:11.5px;color:var(--muted)}
+.msg .receipts{font-size:11.5px;color:var(--muted);margin-top:3px}
+.msg .receipts span{border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-right:4px}
+.thread .empty-t{color:var(--muted);text-align:center;margin:auto}
+.composer{border-top:1px solid var(--line);padding:12px 16px;position:relative}
+.composer textarea{width:100%;min-height:64px;border:1px solid var(--line-strong);border-radius:8px;padding:8px 10px;font:inherit;resize:vertical;background:var(--card);color:var(--ink)}
+.composer .hint{margin:4px 2px 0;font-size:12px;color:var(--muted)}
+.composer .row{display:flex;gap:8px;align-items:center;margin-top:8px;color:var(--muted)}
+.composer select{font:inherit;border:1px solid var(--line-strong);border-radius:6px;padding:4px 6px;background:var(--card);color:var(--ink)}
+.composer .grow{flex:1}
+.composer .draft{font-size:12px;color:var(--muted)}
+/* autocomplete popover (§5.6) */
+.ac{position:absolute;left:16px;right:16px;bottom:calc(100% - 8px);background:var(--card);border:1px solid var(--line-strong);border-radius:10px;box-shadow:var(--shadow);z-index:12;padding:4px;max-height:220px;overflow:auto}
+.ac .opt{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:13px}
+.ac .opt .k{font-family:var(--mono);font-size:12px;color:var(--ink)}
+.ac .opt .d{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ac .opt[aria-selected=true]{background:var(--accent-soft)}
+.ac .cap{font-size:11px;color:var(--muted);padding:4px 8px 2px;letter-spacing:.06em;text-transform:uppercase}
+
+/* ---- ticket panel (§5.9) ---- */
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:20}
+.panel{position:fixed;top:0;right:0;bottom:0;width:480px;max-width:100%;background:var(--card);border-left:1px solid var(--line);z-index:21;display:flex;flex-direction:column;box-shadow:var(--shadow);animation:slide .18s ease-out}
+.panel .handle{position:absolute;left:-3px;top:0;bottom:0;width:6px;cursor:col-resize;z-index:2}
+.panel .handle::after{content:"";position:absolute;left:2px;top:0;bottom:0;width:1px;background:transparent}
+.panel .handle:hover::after,.panel.dragging .handle::after{background:var(--accent)}
+.panel .scroll{overflow:auto;padding:20px 24px 24px;flex:1}
+.panel .back{all:unset;cursor:pointer;color:var(--muted);margin-bottom:12px;display:inline-block}
+.panel h3{margin:0;font-size:18px;font-weight:600;line-height:1.3}
+.panel .id{font-family:var(--mono);color:var(--muted);font-size:12px}
+.panel .sentence{margin:10px 0 0;font-size:15px}
+.panel .actions{margin:14px 0 6px}
+.panel h4{margin:22px 0 8px;font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.panel p{margin:0 0 6px;line-height:1.5}
+.panel .body{white-space:pre-wrap;color:var(--ink)}
+.panel .proof{padding:10px 12px;background:var(--paper);border-radius:8px}
+.panel .kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:13px}
+.panel .kv dt{color:var(--muted)} .panel .kv dd{margin:0;word-break:break-all}
+.panel .pthread{display:flex;flex-direction:column;gap:12px;border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--paper)}
+.panel .pthread .msg .body{background:transparent;padding:0}
+.panel .pthread .msg.me .body{background:var(--accent-soft);padding:8px 10px}
+.panel .composer{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:8px}
+.panel .composer .ac{left:12px;right:12px}
+.verdict{border-left:3px solid var(--line-strong);padding:6px 10px;margin:6px 0}
+.verdict.accept{border-color:var(--working)} .verdict.reject{border-color:var(--blocked)}
+@keyframes slide{from{transform:translateX(24px);opacity:0}to{transform:none;opacity:1}}
+
+/* ---- dialogs ---- */
+.dlg{position:fixed;left:50%;top:14vh;transform:translateX(-50%);width:520px;max-width:calc(100% - 24px);background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);z-index:31;padding:20px 22px}
+.dlg h3{margin:0 0 4px;font-size:17px;font-weight:600}
+.dlg .lede{color:var(--muted);margin:0 0 14px;line-height:1.5}
+.dlg label{display:block;font-size:12.5px;font-weight:600;color:var(--muted);margin:12px 0 4px}
+.dlg input,.dlg textarea{width:100%;border:1px solid var(--line-strong);border-radius:8px;padding:8px 10px;font:inherit;background:var(--card);color:var(--ink)}
+.dlg textarea{min-height:72px;resize:vertical}
+.dlg .shabox{font-family:var(--mono);font-size:12.5px;background:var(--paper);border-radius:8px;padding:8px 10px;word-break:break-all}
+.dlg .foot{display:flex;gap:8px;justify-content:flex-end;margin-top:18px;align-items:center;flex-wrap:wrap}
+.dlg .foot .why{flex:1 1 200px}
+.dlg .stale{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:18px;padding:10px 12px;border:1px solid var(--needs);background:var(--needs-soft);border-radius:8px;color:var(--ink)}
+.dlg .stale .t{flex:1 1 220px}
+.dlg .seat-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-top:6px;cursor:pointer}
+.dlg .seat-row input{width:auto}
+.dlg .seat-row .st{color:var(--muted);font-size:12.5px;margin-left:auto}
+.dlg .seat-row .st.warn{color:var(--needs)}
+.dlg .cmd{display:flex;gap:8px;align-items:center;background:var(--paper);border-radius:8px;padding:8px 10px;font-family:var(--mono);font-size:12.5px;margin-top:8px}
+.dlg .cmd span{flex:1}
+.dlg .cmd button{all:unset;cursor:pointer;color:var(--accent);font-family:var(--sans);font-size:13px}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#262626;color:#fff;padding:10px 14px;border-radius:10px;z-index:40;font-size:13px;max-width:calc(100% - 24px);box-shadow:var(--shadow)}
+.toast code{color:#ffd88a;font-size:12px}
+
+/* ---- phone ---- */
+.seg{display:none}
+@media (max-width:960px){
+  .top{padding:0 14px;gap:10px}
+  .you{display:none}
+  .objective{padding:16px 14px 12px}
+  .objective .row{display:block}
+  .objective .you-mobile{display:block}
+  .progress{min-width:0;text-align:left;margin-top:8px}
+  .progress .bar{max-width:220px}
+  .layout{display:block;padding:14px 14px 60px}
+  .main{max-width:none}
+  .seg{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line-strong);border-radius:10px;overflow:hidden;margin-bottom:16px;background:var(--card)}
+  .seg button{all:unset;text-align:center;padding:8px;cursor:pointer;font-weight:500;position:relative}
+  .seg button[aria-pressed=true]{background:var(--ink);color:var(--paper)}
+  .seg button .dot{position:absolute;top:8px;margin-left:6px;width:7px;height:7px;border-radius:4px;background:var(--needs);border:0}
+  .talk{position:static;max-height:none;min-height:60vh}
+  body[data-tab=board] .talk{display:none}
+  body[data-tab=talk] .main{display:none}
+  .strip{gap:6px}
+  .pill{padding:5px 10px 5px 8px;font-size:13px}
+  .presence{flex-direction:column;align-items:flex-start;gap:6px;margin-bottom:20px}
+  .seat .doing{max-width:calc(100vw - 140px)}
+  .card{padding:12px 12px}
+  .card .head{display:grid;grid-template-columns:1fr auto;gap:4px 10px}
+  .card .id{grid-column:1;grid-row:1}
+  .card .open{grid-column:2;grid-row:1;margin:0}
+  .card .title{grid-column:1/-1}
+  .card .open{margin-left:auto}
+  .panel{width:100%!important;border-left:0}
+  .panel .handle{display:none}
+  .panel .scroll{padding:16px 14px 40px}
+  .dlg{top:auto;bottom:0;left:0;right:0;transform:none;width:100%;max-width:100%;border-radius:14px 14px 0 0}
+}
+</style>
+</head>
+<body data-tab="board">
+
+<div class="mock" id="mockbar"><b>Mockup · state</b></div>
+
+<header class="top">
+  <span class="wordmark">atman</span>
+  <span class="project" title="Project switcher: every board in ~/.config/atman/board.json">demo <span class="chev">▾</span></span>
+  <span class="spacer"></span>
+  <span class="you" id="you"></span>
+  <label class="switch" title="Show paths, transcripts, receipts, limits and phases"><i></i><span id="detailsLabel">Details</span><input type="checkbox" id="detailsToggle" hidden></label>
+</header>
+
+<div class="objective" id="objective"></div>
+
+<div class="layout">
+  <div class="seg" id="seg">
+    <button aria-pressed="true" data-tab="board">Board</button>
+    <button aria-pressed="false" data-tab="talk">Talk<span class="dot hidden" id="talkDot"></span></button>
+  </div>
+  <div class="main" id="main">
+    <div class="strip" id="strip"></div>
+    <div class="presence" id="presence"></div>
+    <div id="sections"></div>
+  </div>
+  <aside class="talk" id="talk"></aside>
+</div>
+
+<div id="overlay"></div>
+
+<script>
+/* =====================================================================
+   Sample data. Shapes mirror /api/v1/plan, /api/v1/board, /api/v1/thread
+   and /api/v1/needs-you on a quickstart board (project "demo", operator
+   "boss", seat "worker"; a second seat "astra" joined as reviewer in the
+   later states). Times are relative strings because this is a static
+   mockup; the app formats `at` in the viewer's zone.
+   Agent rows: state (working/idle), reachable + reason (adapter_state /
+   adapter_reason), seen (seen_h, null = never), doing (the running
+   ticket's last note, spec §5.8), limit / auth as recorded.
+   ===================================================================== */
+const SHA  = "3f2a1c0d9e8b7a6f5e4d3c2b1a0f9e8d7c6b5a49";
+const SHA2 = "9c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d";
+const OBJ = {text:"Ship a small stats API with a screen on top", exit:"the screen shows live stats from the API, accepted by a second seat"};
+const T = {
+  t1:{id:"T-001", title:"Sample: design the data model", role:"backend", body:"A sample ticket created by `atm quickstart`.\n\nIt has no dependencies, so it is the one `atm next` hands out first.\nWork it like a real ticket: claim it, post an update, then send it to review."},
+  t2:{id:"T-002", title:"Sample: build the API on top of the model", role:"backend", deps:["T-001"], body:"A sample ticket that DEPENDS on the first one.\n\n`atm next` will not offer it until the schema ticket is accepted -- that is the dependency graph doing its job, not the board being empty."},
+  t3:{id:"T-003", title:"Sample: put a screen on the API", role:"console", deps:["T-002"], body:"The third sample, two hops down the chain.\n\nRun `atm graph` to see all three and what is blocking what."},
+};
+const WORKER_DETAILS = "harness cursor · transcript ~/.cursor/sessions/demo-worker.jsonl · wake continuous";
+const REVIEW_NOTES = "schema.sql, docs/data-model.md; pytest tests/test_schema.py (6 passed); ids are ULIDs";
+const REVIEW_NOTES2 = "schema.sql, docs/data-model.md; pytest tests/test_schema.py (8 passed); ids are ULIDs; added the rollups table the question was about";
+function tk(base, o){ return Object.assign({}, base, o); }
+const worker = o => Object.assign({name:"worker", state:"idle", reachable:true, seen:"1 min"}, o);
+const astra  = o => Object.assign({name:"astra",  state:"idle", reachable:true, seen:"2 h"}, o);
+
+const STATES = {
+  empty:{
+    label:"Empty board", operator:"boss", objective:null, lead:"", tickets:[], needs:[],
+    agents:[worker({reachable:false, reason:"Adapter offline; directed work will remain queued.", seen:"3 d"})], messages:[]
+  },
+  fresh:{
+    label:"Fresh quickstart", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"ready"}),
+      tk(T.t2,{phase:"waiting", on:"T-001", onState:"open"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[], agents:[worker({seen:"1 min"})],
+    messages:[
+      {from:"worker", at:"9:30 PM", to:"everyone", text:"joined the board; roles=['backend']", receipts:["posted","broadcast"]},
+      {from:"boss", at:"9:31 PM", to:"everyone", text:"hi", receipts:["posted"]},
+    ]
+  },
+  working:{
+    label:"Working", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"working", owner:"worker", running:"12 min", evidence:"claimed 12 min ago · run alive · last output 40 s ago", lastNote:"drafting the schema: three tables, sites, samples, rollups"}),
+      tk(T.t2,{phase:"waiting", on:"T-001", onState:"open"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[], agents:[worker({state:"working", ticket:"T-001", elapsed:"12 min", usage:"usage 38 %, read 3 min ago"})],
+    messages:[
+      {from:"worker", at:"9:30 PM", to:"everyone", text:"joined the board; roles=['backend']", receipts:["posted","broadcast"]},
+      {from:"boss", at:"9:31 PM", to:"worker", text:"hi", receipts:["posted","inbox read","wake confirmed"]},
+      {from:"worker", at:"9:40 PM", to:"boss", re:"T-001", text:"claimed T-001; drafting the schema. Three tables: sites, samples, rollups.", receipts:["posted"]},
+    ]
+  },
+  "needs-you":{
+    label:"Needs you", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"review", owner:"worker", finished:"5 min", sha:SHA, notes:REVIEW_NOTES, branch:"worker/t-001", evidence:"review head submitted 5 min ago · no verdict yet"}),
+      tk(T.t2,{phase:"waiting", on:"T-001", onState:"review"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[{kind:"question", from:"worker", ago:"20 min", re:"T-001", text:"@boss should ids be ULIDs or auto-increment ints? I used ULIDs; say if you want ints before you accept."}],
+    agents:[worker({seen:"5 min", usage:"usage 41 %, read 5 min ago"}), astra({seen:"2 h"})],
+    messages:[
+      {from:"boss", at:"9:31 PM", to:"worker", text:"hi", receipts:["posted","inbox read","wake confirmed"]},
+      {from:"worker", at:"9:40 PM", to:"boss", re:"T-001", text:"claimed T-001; drafting the schema. Three tables: sites, samples, rollups.", receipts:["posted","inbox read"]},
+      {from:"worker", at:"9:52 PM", to:"boss", re:"T-001", text:"@boss should ids be ULIDs or auto-increment ints? I used ULIDs; say if you want ints before you accept.", receipts:["posted","inbox read"]},
+      {from:"worker", at:"10:07 PM", to:"boss", re:"T-001", text:"review: #T-001 at 3f2a1c0 — "+REVIEW_NOTES+". #T-002 can start once this is accepted.", receipts:["posted","inbox read"]},
+    ]
+  },
+  stale:{
+    label:"Changed under you", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"review", owner:"worker", finished:"5 min", sha:SHA, notes:REVIEW_NOTES, branch:"worker/t-001", evidence:"review head submitted 5 min ago · no verdict yet",
+               serverSha:SHA2, serverNotes:REVIEW_NOTES2, serverFinished:"just now"}),
+      tk(T.t2,{phase:"waiting", on:"T-001", onState:"review"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[], agents:[worker({seen:"just now", usage:"usage 44 %, read 1 min ago"}), astra({seen:"2 h"})],
+    messages:[
+      {from:"worker", at:"10:07 PM", to:"boss", re:"T-001", text:"review: #T-001 at 3f2a1c0 — "+REVIEW_NOTES, receipts:["posted","inbox read"]},
+      {from:"worker", at:"10:19 PM", to:"boss", re:"T-001", text:"review: #T-001 at 9c1d2e3 — "+REVIEW_NOTES2, receipts:["posted"]},
+    ]
+  },
+  blocked:{
+    label:"Blocked", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"done", accepted:true, by:"boss", ago:"2 h", sha:SHA, proof:"Accept notes: schema matches the brief; 6 tests pass"}),
+      tk(T.t2,{phase:"blocked", owner:"worker", ago:"40 min", reason:"needs staging DB credentials: no STAGING_DB_URL on this machine and I cannot mint one", evidence:"blocked 40 min ago by worker · atm block T-002"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"blocked"}),
+    ],
+    needs:[{kind:"stuck", from:"worker", ago:"40 min", re:"T-002", text:"needs staging DB credentials: no STAGING_DB_URL on this machine and I cannot mint one"}],
+    agents:[worker({seen:"40 min", usage:"usage 52 %, read 40 min ago"}), astra({reachable:false, reason:"Adapter offline; directed work will remain queued.", seen:"3 h"})],
+    messages:[
+      {from:"worker", at:"10:07 PM", to:"boss", re:"T-001", text:"review: #T-001 at 3f2a1c0 — "+REVIEW_NOTES, receipts:["posted","inbox read"]},
+      {from:"boss", at:"10:12 PM", to:"worker", re:"T-001", text:"accept: schema matches the brief; 6 tests pass", receipts:["posted","inbox read","wake confirmed"]},
+      {from:"worker", at:"11:31 PM", to:"boss", re:"T-002", text:"stuck: needs staging DB credentials: no STAGING_DB_URL on this machine and I cannot mint one. #T-003 waits on this.", receipts:["posted","inbox read"]},
+    ]
+  },
+  accepted:{
+    label:"Accepted", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"done", accepted:true, by:"boss", ago:"2 h", sha:SHA, proof:"Accept notes: schema matches the brief; 6 tests pass"}),
+      tk(T.t2,{phase:"working", owner:"worker", running:"25 min", evidence:"claimed 25 min ago · run alive · last output 2 min ago", lastNote:"writing tests for the /stats endpoint; rollup job next"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[], agents:[worker({state:"working", ticket:"T-002", elapsed:"25 min", usage:"usage 58 %, read 2 min ago"}), astra({seen:"2 h"})],
+    messages:[
+      {from:"boss", at:"10:12 PM", to:"worker", re:"T-001", text:"accept: schema matches the brief; 6 tests pass", receipts:["posted","inbox read","wake confirmed"]},
+      {from:"worker", at:"10:14 PM", to:"boss", re:"T-002", text:"claimed #T-002; /stats endpoint first, then the rollup job. Builds on #T-001.", receipts:["posted","inbox read"]},
+    ]
+  },
+  offline:{
+    label:"Agent offline", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"done", accepted:true, by:"boss", ago:"2 h", sha:SHA, proof:"Accept notes: schema matches the brief; 6 tests pass"}),
+      tk(T.t2,{phase:"limited", owner:"worker", until:"17:40", evidence:"claimed 50 min ago · seat limited (provider quota) · resets 17:40"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[{kind:"limited", from:"worker", until:"17:40", re:"T-002"}],
+    agents:[worker({state:"limited", until:"17:40", ticket:"T-002", usage:"usage 100 %, read 9 min ago"}), astra({seen:null, reachable:null})],
+    messages:[
+      {from:"worker", at:"10:14 PM", to:"boss", re:"T-002", text:"claimed #T-002; /stats endpoint first, then the rollup job.", receipts:["posted","inbox read"]},
+      {from:"boss", at:"10:40 PM", to:"worker", re:"T-002", text:"keep the rollup job in the same PR", receipts:["posted","queued"]},
+    ]
+  },
+  "self-review":{
+    label:"You are the author", operator:"boss", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"review", owner:"boss", finished:"5 min", sha:SHA, notes:REVIEW_NOTES, branch:"boss/t-001", evidence:"review head submitted 5 min ago · no verdict yet"}),
+      tk(T.t2,{phase:"waiting", on:"T-001", onState:"review"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[], agents:[worker({seen:"1 h"})],
+    messages:[{from:"boss", at:"10:07 PM", to:"everyone", re:"T-001", text:"review: #T-001 at 3f2a1c0 — "+REVIEW_NOTES, receipts:["posted","broadcast"]}]
+  },
+  "read-only":{
+    label:"Read-only", operator:"", objective:OBJ, lead:"",
+    tickets:[
+      tk(T.t1,{phase:"review", owner:"worker", finished:"5 min", sha:SHA, notes:REVIEW_NOTES, branch:"worker/t-001", evidence:"review head submitted 5 min ago · no verdict yet"}),
+      tk(T.t2,{phase:"waiting", on:"T-001", onState:"review"}),
+      tk(T.t3,{phase:"waiting", on:"T-002", onState:"open"}),
+    ],
+    needs:[], agents:[worker({seen:"5 min"})],
+    messages:[{from:"worker", at:"10:07 PM", to:"everyone", re:"T-001", text:"review: #T-001 at 3f2a1c0 — "+REVIEW_NOTES, receipts:["posted","broadcast"]}]
+  },
+};
+
+/* ===================================================================== */
+let S, stateKey = "fresh", talkWith = null, aboutId = null;  // aboutId null = not chosen yet: defaults to the ticket the seat is running (§5.6)
+let needsFilter = "all";            // §5.10, session only
+let results = {};                   // §6.1: id -> result line after an action ran (until the next board read)
+let panelId = null;                 // §5.9
+const $ = (s, r=document) => r.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const short = s => s.slice(0,7);
+const q = new URLSearchParams(location.search);
+const store = {
+  get(k, d){ try { const v = localStorage.getItem("app-v3." + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v){ try { localStorage.setItem("app-v3." + k, JSON.stringify(v)); } catch (e) {} },
+};
+const READONLY_WHY = "Read-only. Start with atm ui --operator <name> to act.";
+
+/* ---------- presence (§5.8) ---------- */
+function presenceOf(a){
+  if (a.state === "working") return {k:"working", words: doingNow(a), why:""};
+  if (a.state === "limited") return {k:"limited", words:`limited until ${a.until}`, why:`Provider quota; resets ${a.until}. Nothing runs on it until then.`};
+  if (a.state === "logged-out") return {k:"logged-out", words:"logged out", why:`atm harness auth ${a.name}`};
+  if (a.reachable === false) return {k:"offline", words:"host offline", why:a.reason || "Adapter offline; directed work will remain queued."};
+  if (a.seen == null && a.reachable == null) return {k:"unknown", words:"unknown", why:"No liveness record for this seat. Never seen by this board."};
+  return {k:"idle", words:`idle ${a.seen}`, why:`Reachable, nothing claimed. Last seen ${a.seen} ago.`};
+}
+function doingNow(a){
+  const t = S.tickets.find(x => x.id === a.ticket);
+  if (!t) return `running ${a.ticket}`;
+  if (!t.lastNote) return `running ${t.id}, no update yet`;
+  const clause = t.lastNote.split(/[;:.]/)[0].trim();
+  return `${clause} for ${t.id}`;
+}
+function seatState(a){
+  if (!a) return "";
+  if (a.state === "working") return `running ${a.ticket} for ${a.elapsed}`;
+  if (a.state === "limited") return `limited until ${a.until}`;
+  if (a.state === "logged-out") return `logged out · atm harness auth ${a.name}`;
+  if (a.reachable === false) return "not running · host offline";
+  if (a.seen == null) return "not running · never seen";
+  return `idle since ${a.seen}`;
+}
+function renderPresence(){
+  const seats = S.agents.map(a => { const p = presenceOf(a); return `<button class="seat" data-act="talk:${a.name}" title="${esc(p.why || seatState(a))}"><span class="dot ${p.k}"></span><b>${esc(a.name)}</b><span>·</span><span class="doing">${esc(p.words)}</span></button>`; });
+  if (S.operator) seats.push(`<span class="seat me"><span class="dot working"></span><b>${esc(S.operator)}</b><span>(you)</span></span>`);
+  $("#presence").innerHTML = seats.join("");
+}
+
+/* one sentence per card (spec §5.3) */
+function sentence(t){
+  const opIsOwner = t.owner && t.owner === S.operator;
+  switch (t.phase){
+    case "working": return `${t.owner} has it, running for ${t.running}.`;
+    case "claimed": return `${t.owner} has it, last update ${t.ago} ago.`;
+    case "review": return opIsOwner ? `You finished it ${t.finished} ago. Another seat has to accept it.` : `${t.owner} finished it ${t.finished} ago. Waiting for your accept.`;
+    case "ready": return `Nobody has it. Ready to start.`;
+    case "waiting": {
+      if (t.onState === "review") return `Nobody has it. Waits on ${t.on}, which is in review.`;
+      if (t.onState === "blocked") return `Nobody has it. Waits on ${t.on}, which is blocked.`;
+      if (t.onState === "done-unaccepted") return `Waits on ${t.on}, which is done but not accepted.`;
+      return `Nobody has it. Waits on ${t.on}.`;
+    }
+    case "blocked": return `Blocked by ${t.owner} ${t.ago} ago: <q>${esc(t.reason)}</q>`;
+    case "limited": return `${t.owner} is limited until ${t.until}. Nothing runs on it until then.`;
+    case "offline": return `${t.owner} has no live session. It picks this up when started.`;
+    case "done": return t.accepted ? `Accepted by ${t.by} ${t.ago} ago on <code>${short(t.sha)}</code>.` : `Marked done by ${t.owner} ${t.ago} ago. Not accepted yet.`;
+  }
+  return "";
+}
+function bucket(t){
+  if (t.phase === "review") return "needs";
+  if (t.phase === "working" || t.phase === "claimed") return "working";
+  if (t.phase === "blocked" || t.phase === "limited" || t.phase === "offline") return "blocked";
+  if (t.phase === "done") return "done";
+  return "next";
+}
+function phaseWord(t){
+  if (!t) return "";
+  switch (t.phase){
+    case "review": return "in review"; case "working": case "claimed": return "working"; case "ready": return "ready";
+    case "waiting": return "waits on " + t.on; case "blocked": return "blocked"; case "limited": return "seat limited"; case "offline": return "seat offline";
+    case "done": return t.accepted ? "accepted" : "done, not accepted";
+  }
+  return t.phase;
+}
+function counts(){
+  const c = {working:0, needs:0, blocked:0, done:0, unaccepted:0};
+  for (const t of S.tickets){
+    const b = bucket(t);
+    if (b === "working") c.working++;
+    if (b === "needs") c.needs++;
+    if (b === "blocked") c.blocked++;
+    if (b === "done") { if (t.accepted) c.done++; else c.unaccepted++; }
+  }
+  c.needs += S.needs.length;
+  return c;
+}
+function canAct(){ return !!S.operator; }
+
+/* ---------- button model (§6.1): one verb per button, a visible reason when disabled, a result line after it ran ---------- */
+function btn(label, cls, act, opts={}){
+  const dis = opts.disabled || !canAct();
+  return `<button class="btn ${cls||""}" ${dis?"disabled":""} ${opts.why?`aria-describedby="why-${act.replace(/[^a-z0-9]/gi,"")}"`:""} data-act="${act}">${label}</button>`;
+}
+function row(buttons, whys=[]){
+  if (!buttons.length) return "";
+  const reasons = canAct() ? whys.filter(Boolean) : [READONLY_WHY];
+  const seen = new Set(); const uniq = reasons.filter(r => !seen.has(r) && seen.add(r));
+  return `<div class="actions">${buttons.join("")}${uniq.map(r => `<span class="why">${esc(r)}</span>`).join("")}</div>`;
+}
+function resultLine(id){ return results[id] ? `<div class="result" data-result="${id}">${results[id]}</div>` : ""; }
+
+/* ---------- ticket badges wherever chat mentions a ticket (§5.9) ---------- */
+function rich(text){
+  return esc(text).replace(/#?\b(T-\d{3})\b/g, (m, id) => {
+    const t = ticket(id); if (!t) return m;               // not on this board: plain text
+    return `<button class="badge ${bucket(t)}" data-act="open:${id}" title="${esc(t.title)}"><i></i><span class="id">${id}</span><span class="st">${esc(phaseWord(t))} · ${esc(t.owner || t.by || "nobody")}</span></button>`;
+  });
+}
+
+/* ---------- render ---------- */
+function render(){
+  S = STATES[stateKey];
+  document.body.classList.toggle("readonly", !canAct());
+  $("#you").innerHTML = canAct() ? `You are <b>${esc(S.operator)}</b>` : `<span class="readonly">Read-only. Start with <code>atm ui --operator &lt;name&gt;</code> to act.</span>`;
+  const c = counts();
+  const total = S.tickets.length;
+  const o = $("#objective");
+  if (!S.objective){
+    o.innerHTML = `<div class="row"><div class="grow"><h1 class="muted" style="font-weight:500">No objective yet. Say what this board is for.</h1>
+      <p class="when">${btn("Set objective…","", "set-objective")}</p>
+      <p class="you-mobile">${canAct()?`You are <b>${esc(S.operator)}</b>`:"Read-only"}</p></div></div>`;
+  } else {
+    const pct = total ? Math.round(100*c.done/total) : 0;
+    o.innerHTML = `<div class="row"><div class="grow"><h1>${esc(S.objective.text)}</h1>
+      <p class="when ${S.objective.exit?"":"warn"}">${S.objective.exit ? "Done when "+esc(S.objective.exit) : 'No "done when" set yet.'}${S.objective.exit?"":'<span class="details inline muted"> · <code>atm objective --exit "…"</code></span>'}</p>
+      <p class="you-mobile">${canAct()?`You are <b>${esc(S.operator)}</b>`:"Read-only"}</p></div>
+      <div class="progress"><span class="n">${c.done} of ${total} accepted</span>${c.unaccepted?`<span class="muted"> · ${c.unaccepted} done, not accepted</span>`:""}<div class="bar"><i style="width:${pct}%"></i></div></div></div>`;
+  }
+  const pill = (k, n, label) => `<a class="pill ${k} ${n?"":"zero"} ${k==="needs"&&n?"hot":""}" href="#sec-${k}"><i></i>${n} ${label}</a>`;
+  $("#strip").innerHTML = pill("working", c.working, "working") + pill("needs", c.needs, "needs you") + pill("blocked", c.blocked, "blocked") + pill("done", c.done, "done");
+  renderPresence();
+  $("#talkDot").classList.toggle("hidden", !(S.messages.length && S.messages[S.messages.length-1].from !== S.operator));
+  const secs = $("#sections");
+  if (!S.tickets.length){
+    secs.innerHTML = `<div class="empty"><span class="grow">This board has no tickets. Add work with <code>atm plan</code> or <code>atm create</code>.</span>${btn("Create ticket…","", "create-ticket")}</div>`;
+  } else {
+    const by = {needs:[], working:[], blocked:[], next:[], done:[]};
+    for (const t of S.tickets) by[bucket(t)].push(t);
+    secs.innerHTML =
+      needsSection(by.needs) +
+      section("working", "Working", by.working.length, by.working.map(renderCard).join(""), "Nobody is working. Assign a ticket or start an agent.", btn("Assign…","primary", "assign:") + btn("Start an agent…","quiet","start")) +
+      section("blocked", "Blocked", by.blocked.length, by.blocked.map(renderCard).join(""), "Nothing is blocked.") +
+      section("next", "Up next", by.next.length, by.next.map(renderCard).join(""), "Nothing is queued.") +
+      doneSection(by.done);
+  }
+  renderTalk();
+  $("#detailsLabel").textContent = document.body.classList.contains("show-details") ? "Details on" : "Details";
+  const boardDetails = $("#boardDetails") || document.createElement("p");
+  boardDetails.id = "boardDetails"; boardDetails.className = "details muted"; boardDetails.style.cssText = "margin:-12px 0 20px;font-size:12.5px";
+  boardDetails.innerHTML = `Board read 2 s ago · <code>&lt;repo&gt;/.tickets</code> · operator ${esc(S.operator||"none")} · plan generated 2026-09-24T13:35:12Z · seats: ${S.agents.map(a => `${esc(a.name)} ${esc(seatState(a))}${a.reason?` (${esc(a.reason)})`:""}`).join(" · ")}`;
+  $("#sections").before(boardDetails);
+  if (panelId) openPanel(panelId, true);
+}
+function section(key, title, n, inner, emptyCopy, emptyActions=""){
+  return `<section id="sec-${key}"><h2>${title} <span>(${n})</span></h2>${n ? `<div class="cards">${inner}</div>` : `<div class="empty"><span class="grow">${emptyCopy}</span>${emptyActions}</div>`}</section>`;
+}
+/* Needs you with its four filters (§5.10) */
+function needKind(n){ return n.kind === "question" ? "mentions" : "blocked"; }   // stuck / limited / stopped are "Blocked"
+function needsSection(reviewCards){
+  const items = S.needs.map(n => ({k:needKind(n), html:renderNeed(n)})).concat(reviewCards.map(t => ({k:"accept", html:renderCard(t)})));
+  const n = items.length;
+  const count = k => k === "all" ? n : items.filter(i => i.k === k).length;
+  const chips = [["all","All"],["mentions","Mentions"],["accept","Accept"],["blocked","Blocked"]]
+    .map(([k,l]) => `<button class="chip" aria-pressed="${needsFilter===k}" data-act="filter:${k}">${l}<span class="n">${count(k)}</span></button>`).join("");
+  const shown = items.filter(i => needsFilter === "all" || i.k === needsFilter);
+  const word = {mentions:"Mentions", accept:"Accept", blocked:"Blocked"}[needsFilter];
+  const body = !n ? `<div class="empty"><span class="grow">Nothing needs you right now.</span></div>`
+             : shown.length ? `<div class="cards">${shown.map(i => i.html).join("")}</div>`
+             : `<div class="empty"><span class="grow">Nothing under ${word}.</span></div>`;
+  return `<section id="sec-needs"><h2>Needs you <span>(${n})</span>${n ? `<span class="chips">${chips}</span>` : ""}</h2>${body}</section>`;
+}
+/* Done, collapsed by default (§5.4) */
+function doneSection(cards){
+  const open = store.get("done-open", false);
+  const n = cards.length;
+  return `<section id="sec-done" class="${open?"open":""}"><h2><button class="fold" data-act="fold" aria-expanded="${open}">Done <span>(${n})</span></button>${open?"":`<span style="text-transform:none;letter-spacing:0;font-weight:400">collapsed</span>`}</h2>${open ? (n ? `<div class="cards">${cards.map(renderCard).join("")}</div>` : `<div class="empty"><span class="grow">Nothing accepted yet.</span></div>`) : ""}</section>`;
+}
+function renderNeed(n){
+  let line, r;
+  if (n.kind === "question"){
+    line = `<span class="who">${esc(n.from)}</span> asked ${n.ago} ago about ${rich(n.re)} <q>${rich(n.text)}</q>`;
+    r = row([btn("Answer","primary",`answer:${n.from}:${n.re}`), btn(`Open ${n.re}`,"quiet",`open:${n.re}`)]);
+  } else if (n.kind === "stuck"){
+    line = `<span class="who">${esc(n.from)}</span> has been stuck on ${rich(n.re)} for ${n.ago}: <q>${rich(n.text)}</q>`;
+    r = row([btn("Answer","primary",`answer:${n.from}:${n.re}`), btn("Reassign…","",`assign:${n.re}`), btn(`Open ${n.re}`,"quiet",`open:${n.re}`)]);
+  } else if (n.kind === "limited"){
+    line = `<span class="who">${esc(n.from)}</span> is limited until ${n.until}. ${rich(n.re)} is waiting on it.`;
+    r = row([btn("Reassign…","primary",`assign:${n.re}`), btn("Start another agent…","","start"), btn(`Open ${n.re}`,"quiet",`open:${n.re}`)]);
+  } else if (n.kind === "stopped"){
+    line = `<span class="who">${esc(n.from)}</span> stopped ${n.ago} ago. ${rich(n.re)} is waiting on it.`;
+    r = row([btn("Start…","primary","start"), btn("Reassign…","",`assign:${n.re}`)]);
+  }
+  return `<div class="item"><div class="text">${line}</div>${results[n.re+":"+n.kind] ? `<div class="result">${results[n.re+":"+n.kind]}</div>` : r}</div>`;
+}
+function cardActions(t){
+  if (results[t.id]) return resultLine(t.id);
+  const opIsOwner = t.owner && t.owner === S.operator;
+  const owner = t.owner || "";
+  const selfWhy = "You wrote this, so you can't accept it.";
+  switch (bucket(t)){
+    case "needs": return row([
+        btn(`Accept <span class="sha">${short(t.sha)}</span>`, "primary", `accept:${t.id}`, opIsOwner ? {disabled:true, why:selfWhy} : {}),
+        btn("Reject…","danger",`reject:${t.id}`, opIsOwner?{disabled:true}:{}),
+        btn("Message","",`message:${owner}:${t.id}`)], [opIsOwner ? selfWhy : ""]);
+    case "working": return row([btn("Message","",`message:${owner}:${t.id}`)]);
+    case "blocked": return t.phase === "blocked"
+      ? row([btn("Answer","primary",`answer:${owner}:${t.id}`), btn("Reassign…","",`assign:${t.id}`)])
+      : row([btn("Reassign…","primary",`assign:${t.id}`), btn("Message","",`message:${owner}:${t.id}`)]);
+    case "next": return row([btn("Assign…","",`assign:${t.id}`), btn("Message","quiet",`message::${t.id}`)]);
+    case "done": return "";
+  }
+  return "";
+}
+function cardDetails(t){
+  const bits = [];
+  if (t.evidence) bits.push(`phase ${t.phase} · ${esc(t.evidence)}`);
+  if (t.sha) bits.push(`review head <code>${t.sha}</code>${t.branch?` · branch <code>${esc(t.branch)}</code>`:""}`);
+  if (t.sha) bits.push(`diff: <code>git diff main...${short(t.sha)}</code> · copy and run it in the repo; the app never runs git on a read`);
+  if (t.on) bits.push(`waits on ${t.on} · <code>atm show ${t.on}</code>`);
+  bits.push(`<code>atm show ${t.id}</code>`);
+  return `<div class="details">${bits.join("<br>")}</div>`;
+}
+function renderCard(t){
+  const b = bucket(t);
+  const sub = b === "needs" ? `<p class="sub">Review head <code>${short(t.sha)}</code> · ${esc(t.notes)}</p>` :
+              (b === "done" && t.accepted) ? `<p class="sub">Proof · ${esc(t.proof)}</p>` : "";
+  return `<div class="card ${b}" data-id="${t.id}" data-act="open:${t.id}">
+    <div class="head"><span class="id">${t.id}</span><span class="title">${esc(t.title)}</span><button class="open" data-act="open:${t.id}">Open ›</button></div>
+    <p class="sentence">${sentence(t)}</p>${sub}
+    ${cardActions(t)}
+    ${cardDetails(t)}
+  </div>`;
+}
+
+/* ---------- talk ---------- */
+function defaultTalk(){
+  if (S.lead) return S.lead;
+  const running = S.agents.filter(a => a.state === "working");
+  if (running.length === 1) return running[0].name;
+  return "everyone";
+}
+function draftKey(to, re){ return `${stateKey}|${to}|${re||""}`; }
+function draftsAll(){ return store.get("drafts", {}); }
+function saveDraft(to, re, text){ const d = draftsAll(); if (text) d[draftKey(to,re)] = text; else delete d[draftKey(to,re)]; store.set("drafts", d); }
+function composerHtml(id, to, re, opts={}){
+  const draft = draftsAll()[draftKey(to, re)] || "";
+  const aboutOpts = [`<option value="">no ticket</option>`].concat(S.tickets.map(t => `<option value="${t.id}" ${t.id===re?"selected":""}>about ${t.id}</option>`)).join("");
+  return `<div class="composer" data-composer="${id}"><textarea id="${id}" placeholder="Message ${to==="everyone"?"everyone":esc(to)}${opts.fixed?" about "+re:""}…" ${canAct()?"":"disabled"}>${esc(draft)}</textarea>
+      <div class="hint">Enter to send · Shift+Enter for a new line · @seat and #ticket autocomplete</div>
+      <div class="row">${opts.fixed ? `<span class="muted">about <code>${re}</code></span>` : `<select id="about">${aboutOpts}</select>`}<span class="draft ${draft?"":"hidden"}">Draft kept</span><span class="grow"></span>${btn("Send","primary",`send:${id}`)}</div></div>`;
+}
+function renderTalk(){
+  if (talkWith === null) talkWith = defaultTalk();
+  const a = S.agents.find(x => x.name === talkWith);
+  const everyone = talkWith === "everyone";
+  if (aboutId === null) aboutId = (a && a.ticket && S.tickets.some(t => t.id === a.ticket)) ? a.ticket : "";
+  const opts = [`<option value="everyone" ${everyone?"selected":""}>Everyone on the board</option>`]
+    .concat(S.agents.map(x => `<option value="${x.name}" ${x.name===talkWith?"selected":""}>${x.name} · ${seatState(x)}</option>`)).join("");
+  let state = "", note = "";
+  if (everyone){
+    state = `<div class="state">No agent is running. Messages land on the board; the next agent that wakes reads them.</div>`;
+    const anyRunning = S.agents.some(x => x.state === "working");
+    if (anyRunning) state = `<div class="state">Posts to every seat on this board.</div>`;
+    else note = `<div class="note">Nothing is running on this board.${btn("Start an agent…","", "start")}</div>`;
+  } else if (a){
+    const cls = a.state === "working" ? "on" : (a.state === "limited" || a.state === "logged-out" ? "warn" : "");
+    state = `<div class="state ${cls}">${seatState(a)}</div>`;
+    if (a.state === "limited") note = `<div class="note">${a.name} is limited until ${a.until}. Your message is kept; it reads it when the limit lifts.<br>${btn("Reassign its work…","", "assign:"+(a.ticket||S.tickets.find(t=>t.owner===a.name)?.id||""))}</div>`;
+    else if (a.reachable === false) note = `<div class="note">${a.name}'s host is offline: ${esc(a.reason||"")} Your message is kept; it reads it when the host reconnects.${btn("Start an agent…","", "start")}</div>`;
+    else if (a.state !== "working") note = `<div class="note">${a.name} is not running. Your message is kept; it reads it when it starts.${btn("Start an agent…","", "start")}</div>`;
+  }
+  const msgs = S.messages.filter(m => everyone ? true : (m.from === talkWith || m.to === talkWith));
+  const thread = msgs.length ? msgs.map(renderMsg).join("") : `<div class="empty-t">No messages with ${everyone?"the board":talkWith} yet.</div>`;
+  $("#talk").innerHTML = `<div class="th"><div class="label">Talk to</div>
+      <div class="who"><select id="talkWith" title="Who you are talking to. Never picked for you unless a single agent is running.">${opts}</select></div>${state}${note}
+      <div class="details muted" style="margin-top:8px;font-size:12.5px">${a ? `${esc(a.usage||"usage not read")} · auth checked 1 h ago · ${WORKER_DETAILS}${a.reason?` · ${esc(a.reason)}`:""}` : "board thread is broadcast"}</div></div>
+    <div class="thread" id="thread">${thread}</div>
+    ${composerHtml("composer", talkWith, aboutId)}`;
+  $("#talkWith").onchange = e => { talkWith = e.target.value; aboutId = null; renderTalk(); };
+  $("#about").onchange = e => { const box = $("#composer"); saveDraft(talkWith, aboutId, box.value); aboutId = e.target.value; box.value = draftsAll()[draftKey(talkWith, aboutId)] || ""; $("#talk .draft").classList.toggle("hidden", !box.value); };
+  const th = $("#thread"); th.scrollTop = th.scrollHeight;
+}
+function renderMsg(m){
+  return `<div class="msg ${m.from===S.operator?"me":""}">
+      <div class="meta"><b>${esc(m.from)}</b><span>${m.at}</span>${m.re?`<span class="re">${m.re}</span>`:""}${m.to==="everyone"?`<span>to everyone</span>`:""}</div>
+      <p class="body">${rich(m.text)}</p>
+      <div class="receipts details">${m.receipts.map(r=>`<span>${r}</span>`).join("")}<span class="details inline">harness ${m.from==="worker"?"cursor":"—"}</span> <button class="btn quiet" style="height:22px;padding:0 6px;font-size:12px" data-act="copy">Copy</button></div>
+    </div>`;
+}
+
+/* ---------- ticket panel (§5.9) + dialogs ---------- */
+function ticket(id){ return S.tickets.find(t => t.id === id); }
+function closeOverlay(){ $("#overlay").innerHTML = ""; panelId = null; }
+function openPanel(id, rerender=false){
+  const t = ticket(id); if (!t) return;
+  panelId = id;
+  const b = bucket(t);
+  const deps = (t.deps||[]).map(d => { const dt = ticket(d); return `<li>${rich(d)}${dt?"":" · missing"}</li>`; }).join("");
+  const msgs = S.messages.filter(m => m.re === id);
+  const width = Math.min(720, Math.max(360, store.get("panel-width", 480)));
+  const to = t.owner && t.owner !== S.operator ? t.owner : "everyone";
+  $("#overlay").innerHTML = `<div class="scrim" data-act="close"></div><div class="panel" id="panel" role="dialog" aria-label="${id}" style="width:${width}px"><div class="handle" id="handle" title="Drag to resize"></div><div class="scroll">
+    <button class="back" data-act="close">‹ Back</button>
+    <div class="id">${id} · ${t.role}</div><h3>${esc(t.title)}</h3>
+    <p class="sentence">${sentence(t)}</p>
+    ${cardActions(t)}
+    <h4>Thread about ${id}</h4>
+    <div class="pthread">${msgs.length ? msgs.map(renderMsg).join("") : `<p class="muted" style="margin:0">No messages about ${id} yet.</p>`}</div>
+    ${composerHtml("composer-panel", to, id, {fixed:true})}
+    <h4>Ticket</h4><p class="body">${esc(t.body)}</p>
+    ${deps?`<h4>Waits on</h4><ul style="margin:0;padding-left:18px">${deps}</ul>`:""}
+    ${t.sha ? `<h4>Review</h4><dl class="kv"><dt>Submitted by</dt><dd>${t.owner||t.by} · ${t.finished?t.finished+" ago":t.ago+" ago"}</dd><dt>Head</dt><dd><code>${t.sha}</code></dd>${t.branch?`<dt>Branch</dt><dd><code>${esc(t.branch)}</code></dd>`:""}${t.notes?`<dt>Notes</dt><dd>${esc(t.notes)}</dd>`:""}</dl>
+      ${t.accepted ? `<div class="verdict accept">Accepted by ${t.by} ${t.ago} ago on <code>${short(t.sha)}</code></div>` : `<div class="verdict">No verdict yet.</div>`}` : ""}
+    ${t.accepted ? `<h4>Acceptance proof</h4><p class="proof">${esc(t.proof)}</p>` : (b==="needs" ? `<h4>Acceptance proof</h4><p class="proof muted">None yet. Your accept, with its notes, becomes the proof.</p>` : "")}
+    <div class="details"><h4>Details</h4><p class="muted" style="font-size:12.5px;line-height:1.6">${cardDetails(t).replace(/<\/?div[^>]*>/g,"")}</p></div>
+  </div></div>`;
+  const handle = $("#handle"), panel = $("#panel");
+  handle.onpointerdown = e => {
+    e.preventDefault(); panel.classList.add("dragging"); handle.setPointerCapture(e.pointerId);
+    const move = ev => { const w = Math.min(720, Math.max(360, Math.round(window.innerWidth - ev.clientX))); panel.style.width = w + "px"; };
+    const up = ev => { panel.classList.remove("dragging"); store.set("panel-width", parseInt(panel.style.width, 10)); handle.removeEventListener("pointermove", move); handle.removeEventListener("pointerup", up); };
+    handle.addEventListener("pointermove", move); handle.addEventListener("pointerup", up);
+  };
+}
+function dialog(html){ $("#overlay").innerHTML = `<div class="scrim" data-act="close"></div><div class="dlg" role="dialog">${html}</div>`; }
+function openAccept(id){
+  const t = ticket(id); if (!t) return;
+  if (!t.sha){ toast("Nothing was submitted for review yet."); return; }
+  const self = t.owner === S.operator;
+  // §6.2 stale view: the app re-reads the ticket before it lets you post; a new head replaces the primary button.
+  const stale = t.serverSha && t.serverSha !== t.sha;
+  const foot = stale
+    ? `<div class="stale" id="stale"><span class="t">Changed since you opened this: new head <code>${short(t.serverSha)}</code> from ${t.owner}, ${t.serverFinished}.</span>${btn("Review again","primary",`review-again:${id}`)}</div><div class="foot"><button class="btn" data-act="close">Cancel</button></div>`
+    : `<div class="foot">${self?`<span class="why">You wrote this, so you can't accept it. Ask another seat.</span>`:""}<button class="btn" data-act="close">Cancel</button><button class="btn primary" ${self?"disabled":""} data-act="do-accept:${id}">Accept <span class="sha">${short(t.sha)}</span></button></div>`;
+  dialog(`<h3>Accept ${id}</h3><p class="lede">${esc(t.title)}. Submitted by ${t.owner} ${t.finished} ago. Your accept binds to this exact head and nothing else.</p>
+    <label>Review head</label><div class="shabox">${t.sha}</div>
+    <label>What the seat said to look at</label><p style="margin:0">${esc(t.notes)}</p>
+    <label>Notes (why this is accepted)</label><textarea id="acceptNotes" placeholder="What you checked and why it passes" ${self||stale?"disabled":""}></textarea>
+    ${foot}
+    <p class="details muted" style="margin:12px 0 0;font-size:12px">re-read GET /api/v1/ticket/${id} → review.latest.sha, then POST /api/v1/ticket/${id}/accept {sha, notes} · <code>atm accept ${id} --sha ${short(t.sha)}… --notes "…"</code></p>`);
+}
+function openReject(id){
+  const t = ticket(id); if (!t) return;
+  if (!t.sha){ toast("Nothing was submitted for review yet."); return; }
+  const stale = t.serverSha && t.serverSha !== t.sha;
+  const foot = stale
+    ? `<div class="stale"><span class="t">Changed since you opened this: new head <code>${short(t.serverSha)}</code> from ${t.owner}, ${t.serverFinished}.</span>${btn("Review again","primary",`review-again:${id}`)}</div><div class="foot"><button class="btn" data-act="close">Cancel</button></div>`
+    : `<div class="foot"><button class="btn" data-act="close">Cancel</button><button class="btn danger" data-act="do-reject:${id}">Reject and return to ${t.owner}</button></div>`;
+  dialog(`<h3>Reject ${id}</h3><p class="lede">${esc(t.title)}. Goes back to ${t.owner} as claimed, with your reason.</p>
+    <label>Review head</label><div class="shabox">${t.sha}</div>
+    <label>Reason (required)</label><textarea id="rejectReason" placeholder="What is wrong and what would pass" ${stale?"disabled":""}></textarea>
+    ${foot}
+    <p class="details muted" style="margin:12px 0 0;font-size:12px">POST /api/v1/ticket/${id}/reject {sha, reason} · <code>atm reject ${id} --sha ${short(t.sha)}… --reason "…"</code></p>`);
+}
+function openAssign(id){
+  const t = id ? ticket(id) : null; if (id && !t) return;
+  const seats = S.agents.map(a => { const p = presenceOf(a); const warn = p.k !== "working" && p.k !== "idle"; return `<label class="seat-row"><input type="radio" name="seat" value="${a.name}"><span class="dot ${p.k}"></span><span>${a.name}</span><span class="st ${warn?"warn":""}">${seatState(a)}${warn?" · will not start until then":""}</span></label>`; }).join("");
+  dialog(`<h3>${t&&t.owner?"Reassign":"Assign"} ${id||"a ticket"}</h3><p class="lede">${t?esc(t.title)+". ":""}Claims it on the seat's behalf. Nothing is picked for you.</p>
+    ${id?"":`<label>Ticket</label><select id="assignTicket" style="width:100%;font:inherit;padding:8px;border:1px solid var(--line-strong);border-radius:8px;background:var(--card);color:var(--ink)">${S.tickets.filter(x=>bucket(x)==="next").map(x=>`<option value="${x.id}">${x.id} · ${esc(x.title)}</option>`).join("")}</select>`}
+    <label>Seat</label>${seats}
+    <label>Why (optional)</label><input id="assignWhy" placeholder="Appended to the ticket's note">
+    <div class="foot"><span class="why hidden" id="assignWhyNone">Pick a seat first. The app never picks one for you.</span><button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="do-assign:${id}">Assign</button></div>
+    <p class="details muted" style="margin:12px 0 0;font-size:12px">POST /api/v1/ticket/${id||"<id>"}/assign {owner, notes} · <code>atm assign ${id||"<id>"} --owner &lt;seat&gt; --notes "…"</code></p>`);
+}
+function openStart(){
+  dialog(`<h3>Start an agent</h3><p class="lede">Runs a harness on your machine with your credentials, so the app does not start it for you. Paste this in a terminal.</p>
+    <label>Seat</label><p style="margin:0">worker · cursor (as registered with <code>atm join</code>)</p>
+    <div class="cmd"><span>atm spawn worker --persist</span><button data-act="copy">Copy</button></div>
+    <div class="foot"><button class="btn" data-act="close">Done</button></div>`);
+}
+function openSetObjective(){
+  dialog(`<h3>Set the objective</h3><p class="lede">One sentence for what this board is for, and how you will know it is done.</p>
+    <label>Objective</label><input placeholder="Ship a small stats API with a screen on top">
+    <label>Done when</label><input placeholder="the screen shows live stats from the API, accepted by a second seat">
+    <div class="foot"><button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="do-objective">Set objective</button></div>
+    <p class="details muted" style="margin:12px 0 0;font-size:12px">POST /api/v1/objective · <code>atm objective --set "…" --exit "…"</code></p>`);
+}
+function openCreate(){
+  dialog(`<h3>Create a ticket</h3><label>Title</label><input placeholder="What has to be true when this is done">
+    <label>Role</label><input placeholder="backend">
+    <div class="foot"><button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="do-create">Create</button></div>
+    <p class="details muted" style="margin:12px 0 0;font-size:12px">POST /api/v1/ticket · <code>atm create "…" --role backend</code></p>`);
+}
+let toastTimer;
+function toast(html){
+  let el = $(".toast"); if (!el){ el = document.createElement("div"); el.className = "toast"; document.body.appendChild(el); }
+  el.innerHTML = html; clearTimeout(toastTimer); toastTimer = setTimeout(() => el.remove(), 3200);
+}
+function focusComposer(to, re){
+  talkWith = to || "everyone"; aboutId = re || null; document.body.dataset.tab = "talk"; syncSeg();
+  renderTalk(); setTimeout(() => $("#composer")?.focus(), 30);
+}
+/* the mockup's stand-in for "the next board read": the result line gives way to the card's new state */
+let readTimer;
+function nextBoardRead(fn){ clearTimeout(readTimer); readTimer = setTimeout(() => { fn(); results = {}; render(); }, 2600); }
+
+/* ---------- autocomplete (§5.6) ---------- */
+let ac = null;   // {box, kind, start, items, idx}
+function acItems(kind, term){
+  term = term.toLowerCase();
+  if (kind === "@") return [{k:"everyone", d:"the whole board", dot:""}].concat(S.agents.map(a => { const p = presenceOf(a); return {k:a.name, d:p.words, dot:p.k}; })).filter(i => i.k.toLowerCase().startsWith(term));
+  return S.tickets.map(t => ({k:t.id, d:`${t.title} · ${phaseWord(t)} · ${t.owner||t.by||"nobody"}`, dot:bucket(t)})).filter(i => (i.k + " " + i.d).toLowerCase().includes(term));
+}
+function acUpdate(box){
+  const upto = box.value.slice(0, box.selectionStart);
+  const m = /(^|\s)([@#])([\w-]*)$/.exec(upto);
+  if (!m){ acClose(); return; }
+  const items = acItems(m[2], m[3]);
+  if (!items.length){ acClose(); return; }
+  ac = {box, kind:m[2], start:upto.length - m[3].length - 1, items, idx:0};
+  acDraw();
+}
+function acDraw(){
+  const host = ac.box.closest(".composer");
+  let el = host.querySelector(".ac"); if (!el){ el = document.createElement("div"); el.className = "ac"; el.setAttribute("role","listbox"); host.appendChild(el); }
+  el.innerHTML = `<div class="cap">${ac.kind === "@" ? "Seats" : "Tickets"} · ↑↓ then Enter or Tab</div>` + ac.items.map((i, n) => `<div class="opt" role="option" aria-selected="${n===ac.idx}" data-ac="${n}">${i.dot?`<span class="dot ${i.dot}"></span>`:""}<span class="k">${esc(i.k)}</span><span class="d">${esc(i.d)}</span></div>`).join("");
+}
+function acPick(n){
+  const i = ac.items[n]; const box = ac.box;
+  const before = box.value.slice(0, ac.start), after = box.value.slice(box.selectionStart);
+  const ins = ac.kind + i.k + " ";
+  box.value = before + ins + after; box.selectionStart = box.selectionEnd = before.length + ins.length;
+  if (ac.kind === "#" && box.id === "composer" && !aboutId){ saveDraft(talkWith, aboutId, ""); aboutId = i.k; const sel = $("#about"); if (sel) sel.value = i.k; }
+  acClose(); box.focus(); box.dispatchEvent(new Event("input"));
+}
+function acClose(){ document.querySelectorAll(".ac").forEach(e => e.remove()); ac = null; }
+
+/* ---------- events ---------- */
+function sendComposer(id){
+  const box = document.getElementById(id); if (!box || box.disabled) return;
+  const txt = box.value.trim(); if (!txt){ box.focus(); return; }
+  const inPanel = id === "composer-panel";
+  const to = inPanel ? (ticket(panelId)?.owner && ticket(panelId).owner !== S.operator ? ticket(panelId).owner : "everyone") : talkWith;
+  const re = inPanel ? panelId : aboutId;
+  S.messages.push({from:S.operator, at:"now", to, re, text:txt, receipts:["posted"]});
+  box.value = ""; saveDraft(to, re, "");
+  toast(`Sent · to ${esc(to)}${re?" · about "+re:""} · posted &nbsp;<code>POST /msg</code> (<code>atm msg --to ${esc(to)}${re?" --re "+re:""} "…"</code>)`);
+  renderTalk(); if (inPanel) openPanel(panelId);
+}
+document.addEventListener("click", e => {
+  const acOpt = e.target.closest("[data-ac]"); if (acOpt && ac){ acPick(+acOpt.dataset.ac); return; }
+  const el = e.target.closest("[data-act]"); if (!el || el.disabled) return;
+  if (el.classList.contains("card") && e.target.closest("button, select, a, textarea, input, .actions, .details")) return;  // buttons on a card act for themselves
+  e.stopPropagation();
+  const [act, a1, a2] = el.dataset.act.split(":");
+  switch (act){
+    case "open": openPanel(a1); break;
+    case "close": closeOverlay(); break;
+    case "talk": focusComposer(a1, null); break;
+    case "filter": needsFilter = a1; render(); break;
+    case "fold": store.set("done-open", !store.get("done-open", false)); render(); break;
+    case "accept": openAccept(a1); break;
+    case "reject": openReject(a1); break;
+    case "assign": openAssign(a1); break;
+    case "start": openStart(); break;
+    case "set-objective": openSetObjective(); break;
+    case "create-ticket": openCreate(); break;
+    case "message": closeOverlay(); focusComposer(a1, a2); break;
+    case "answer": closeOverlay(); focusComposer(a1, a2); break;
+    case "send": sendComposer(a1 || "composer"); break;
+    case "review-again": { const t = ticket(a1); t.sha = t.serverSha; t.notes = t.serverNotes; t.finished = t.serverFinished; t.evidence = "review head submitted just now · no verdict yet"; delete t.serverSha; render(); openAccept(a1); break; }
+    case "do-accept": { const t = ticket(a1); const n = $("#acceptNotes").value.trim(); if (!n){ $("#acceptNotes").focus(); return; }
+      results[a1] = `Accepted · by ${esc(S.operator)} · <code>${short(t.sha)}</code>`; closeOverlay(); render();
+      toast(`<code>POST /api/v1/ticket/${a1}/accept</code> {sha: ${short(t.sha)}…, notes} · gate: operator ≠ author, sha = submitted head`);
+      nextBoardRead(() => { Object.assign(t, {phase:"done", accepted:true, by:S.operator, ago:"just now", proof:"Accept notes: " + n}); const d = ticket("T-002"); if (d && d.on === a1) d.onState = "open"; S.needs = S.needs.filter(x => x.re !== a1 || x.kind !== "question"); });
+      break; }
+    case "do-reject": { const t = ticket(a1); const r = $("#rejectReason").value.trim(); if (!r){ $("#rejectReason").focus(); return; }
+      results[a1] = `Rejected · by ${esc(S.operator)} · <code>${short(t.sha)}</code> · back with ${esc(t.owner)}`; closeOverlay(); render();
+      toast(`<code>POST /api/v1/ticket/${a1}/reject</code> {sha, reason} · returns ${a1} to its author as claimed`);
+      nextBoardRead(() => { Object.assign(t, {phase:"claimed", ago:"just now"}); });
+      break; }
+    case "do-assign": { const seat = document.querySelector('input[name=seat]:checked')?.value; if (!seat){ $("#assignWhyNone").classList.remove("hidden"); return; }
+      const id = a1 || $("#assignTicket")?.value; const t = ticket(id);
+      results[id] = `Assigned · to ${esc(seat)} · by ${esc(S.operator)}`; closeOverlay(); render();
+      toast(`<code>POST /api/v1/ticket/${id}/assign</code> {owner: ${seat}} (<code>atm assign ${id} --owner ${seat}</code>)`);
+      nextBoardRead(() => { if (t) Object.assign(t, {phase:"claimed", owner:seat, ago:"just now"}); });
+      break; }
+    case "do-objective": closeOverlay(); toast(`Mockup: would <code>POST /api/v1/objective</code> (<code>atm objective --set … --exit …</code>)`); break;
+    case "do-create": closeOverlay(); toast(`Mockup: would <code>POST /api/v1/ticket</code> (<code>atm create …</code>)`); break;
+    case "copy": toast("Copied."); break;
+  }
+});
+document.addEventListener("input", e => {
+  const box = e.target; if (!(box instanceof HTMLTextAreaElement) || !box.closest(".composer")) return;
+  acUpdate(box);
+  const inPanel = box.id === "composer-panel";
+  const to = inPanel ? (ticket(panelId)?.owner && ticket(panelId).owner !== S.operator ? ticket(panelId).owner : "everyone") : talkWith;
+  saveDraft(to, inPanel ? panelId : aboutId, box.value);
+  const d = box.closest(".composer").querySelector(".draft"); if (d) d.classList.toggle("hidden", !box.value);
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape"){ if (ac){ acClose(); return; } closeOverlay(); return; }
+  const box = e.target;
+  if (!(box instanceof HTMLTextAreaElement) || !box.closest(".composer")) return;
+  if (ac && ac.box === box){
+    if (e.key === "ArrowDown"){ e.preventDefault(); ac.idx = (ac.idx + 1) % ac.items.length; acDraw(); return; }
+    if (e.key === "ArrowUp"){ e.preventDefault(); ac.idx = (ac.idx - 1 + ac.items.length) % ac.items.length; acDraw(); return; }
+    if (e.key === "Enter" || e.key === "Tab"){ e.preventDefault(); acPick(ac.idx); return; }   // Enter picks; it never sends while the list is open
+  }
+  // Enter sends; Shift+Enter (or any modifier) keeps the default and adds a new line.
+  // While an IME composition is active (isComposing, or the legacy keyCode 229), Enter belongs to the editor: nothing is sent.
+  if (e.key === "Enter" && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey){
+    if (e.isComposing || e.keyCode === 229) return;
+    e.preventDefault(); sendComposer(box.id);
+  }
+});
+$("#detailsToggle").addEventListener("change", e => { document.body.classList.toggle("show-details", e.target.checked); $("#detailsLabel").textContent = e.target.checked ? "Details on" : "Details"; });
+function syncSeg(){ for (const b of $("#seg").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.tab === document.body.dataset.tab)); }
+$("#seg").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; document.body.dataset.tab = b.dataset.tab; syncSeg(); });
+
+/* ---------- mock state bar ---------- */
+const bar = $("#mockbar");
+for (const [k, v] of Object.entries(STATES)){
+  const b = document.createElement("button"); b.textContent = v.label; b.dataset.state = k;
+  b.onclick = () => setState(k); bar.appendChild(b);
+}
+function setState(k){
+  stateKey = k; talkWith = null; aboutId = null; results = {}; needsFilter = "all"; clearTimeout(readTimer); closeOverlay();
+  for (const b of bar.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.state === k));
+  render();
+  history.replaceState(null, "", "?state=" + k + (document.body.classList.contains("show-details") ? "&details=1" : "") + (document.body.dataset.tab==="talk"?"&tab=talk":""));
+}
+if (q.get("details") === "1"){ document.body.classList.add("show-details"); $("#detailsToggle").checked = true; }
+if (q.get("tab") === "talk"){ document.body.dataset.tab = "talk"; syncSeg(); }
+if (q.get("bare") === "1") bar.classList.add("hidden");
+if (q.get("done") === "1") store.set("done-open", true);
+if (q.get("done") === "0") store.set("done-open", false);
+setState(STATES[q.get("state")] ? q.get("state") : "fresh");
+if (q.get("filter")){ needsFilter = q.get("filter"); render(); }
+if (q.get("result")){ const [what, id] = q.get("result").split(":"); const t = ticket(id);
+  if (t && what === "accept") results[id] = `Accepted · by ${esc(S.operator)} · <code>${short(t.sha)}</code>`;
+  if (t && what === "reject") results[id] = `Rejected · by ${esc(S.operator)} · <code>${short(t.sha)}</code> · back with ${esc(t.owner)}`;
+  if (t && what === "assign") results[id] = `Assigned · to worker · by ${esc(S.operator)}`;
+  render(); }
+if (q.get("open")) openPanel(q.get("open"));
+if (q.get("dialog") === "accept") openAccept(q.get("open") || "T-001");
+if (q.get("dialog") === "reject") openReject(q.get("open") || "T-001");
+if (q.get("dialog") === "assign") openAssign(q.get("open") || "");
+if (q.get("dialog") === "start") openStart();
+if (q.get("ac")){ const id = q.get("open") ? "composer-panel" : "composer"; const box = document.getElementById(id); if (box){ box.value = q.get("ac"); box.focus(); box.selectionStart = box.selectionEnd = box.value.length; acUpdate(box); } }
+</script>
+</body>
+</html>

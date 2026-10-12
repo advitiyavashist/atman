@@ -1,0 +1,22 @@
+{
+  "local_links": [
+    "docs/byoa.md",
+    "docs/first-session.md",
+    "docs/onboarding/README.md",
+    "docs/onboarding/master-howto.md",
+    "docs/first-session.md",
+    "docs/onboarding/README.md",
+    "docs/onboarding/master-howto.md",
+    "docs/byoa.md",
+    "docs/messages-and-runners.md",
+    "docs/knowledge/README.md",
+    "docs/recovery-contract.md",
+    "CONTRIBUTING.md",
+    "docs/community.md",
+    "CODE_OF_CONDUCT.md",
+    "docs/onboarding/ceo-mac-runbook.md",
+    "docs/architecture/ADR-001-go-core.md",
+    "LICENSE"
+  ],
+  "missing": []
+}
