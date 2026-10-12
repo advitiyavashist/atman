@@ -9,7 +9,7 @@
  */
 
 import type { AtmanApi, Origin } from "../../../ui/src/api/client";
-import type { Board, Lead, NeedsYou, Plan, Projects, Session, Thread, Ticket } from "../../../ui/src/api/types";
+import type { ActionResponse, Board, Lead, NeedsYou, Plan, Projects, Session, Thread, Ticket } from "../../../ui/src/api/types";
 import { fixture } from "./schema";
 
 export interface FakeParts {
@@ -27,6 +27,19 @@ export interface FakeParts {
   writeToken?: string;
   /** Older pages, keyed by the `before` cursor the app sends. */
   pages?: Record<string, Partial<Thread>>;
+  /** The ticket-panel threads (`thread?re=`), keyed by ticket id. */
+  threadsRe?: Record<string, Partial<Thread>>;
+  /**
+   * What the write routes answer. A function sees the call and returns the
+   * response; a string makes the route refuse with that sentence (the server's
+   * own words), which is how a gate refusal reaches a dialog.
+   */
+  action?: ((id: string, action: "accept" | "reject" | "assign", body: Record<string, string>) => Partial<ActionResponse>) | string;
+  /**
+   * What `GET /ticket/{id}` answers now, when the server has moved on from the
+   * plan the page was drawn with: the stale-head case (§6.2).
+   */
+  ticketLater?: Record<string, Partial<Ticket>>;
   /**
    * Answers that bypass the fixture generator entirely.
    *
@@ -52,6 +65,8 @@ export interface Fake {
   posted: Array<{ from: string; text: string; to?: string; re?: string }>;
   leadSet: string[];
   calls: string[];
+  /** Every write the app sent to the three ticket routes, in order. */
+  actions: Array<{ id: string; action: "accept" | "reject" | "assign"; body: Record<string, string>; project?: string }>;
 }
 
 const PROJECT = "alpha";
@@ -60,6 +75,7 @@ export function fakeApi(parts: FakeParts = {}): Fake {
   const posted: Fake["posted"] = [];
   const leadSet: string[] = [];
   const calls: string[] = [];
+  const actions: Fake["actions"] = [];
 
   const seen: Record<string, number> = {};
 
@@ -143,12 +159,25 @@ export function fakeApi(parts: FakeParts = {}): Fake {
         )
       );
     },
-    thread(opts: { project?: string; with?: string; before?: string }) {
-      calls.push(`thread:${opts.project ?? ""}:${opts.with ?? ""}:${opts.before ?? ""}`);
+    thread(opts: { project?: string; with?: string; re?: string; before?: string }) {
+      calls.push(`thread:${opts.project ?? ""}:${opts.with ?? ""}:${opts.before ?? ""}${opts.re ? `:re=${opts.re}` : ""}`);
       const failed = boom("thread", opts.project);
       if (failed) return failed;
       const given = raw("thread");
       if (given) return given as Promise<Thread>;
+      if (opts.re) {
+        const about = parts.threadsRe?.[opts.re];
+        return Promise.resolve(
+          fixture<Thread>("thread.json", {
+            project: opts.project || PROJECT,
+            operator: "ada",
+            lead: "planner",
+            with: "",
+            re: opts.re,
+            ...about,
+          }),
+        );
+      }
       if (opts.before) {
         const page = parts.pages?.[opts.before];
         return Promise.resolve(
@@ -183,11 +212,43 @@ export function fakeApi(parts: FakeParts = {}): Fake {
       calls.push(`ticket:${id}:${project ?? ""}`);
       const failed = boom("ticket");
       if (failed) return failed;
-      const over = parts.tickets?.[id];
+      const over = parts.ticketLater?.[id] ?? parts.tickets?.[id];
       if (!over && parts.tickets) return Promise.reject(new Error(`no such ticket ${id}`));
       return Promise.resolve(
         fixture<Ticket>("ticket.json", { id, project: project || PROJECT, title: `${id} title`, ...over }),
       );
+    },
+    ticketAction(id: string, action: "accept" | "reject" | "assign", body: Record<string, string>, project?: string) {
+      actions.push({ id, action, body, project });
+      const given = parts.action;
+      if (typeof given === "string") return Promise.reject(new Error(given));
+      const over = typeof given === "function" ? given(id, action, body) : {};
+      const base: ActionResponse = {
+        ok: true,
+        action,
+        ticket: id,
+        project: project || PROJECT,
+        by: "ada",
+        sha: body.sha || "",
+        at: new Date().toISOString(),
+        status: action === "reject" ? "claimed" : action === "assign" ? "claimed" : "review",
+        status_label: action === "reject" ? "IN PROGRESS" : action === "assign" ? "IN PROGRESS" : "IN REVIEW",
+        owner: action === "assign" ? body.owner || "" : "",
+        returned_to: "",
+        changed: action === "assign" ? [`claimed for ${body.owner || ""}`] : [],
+        released: [],
+        started: [],
+      };
+      return Promise.resolve({ ...base, ...over });
+    },
+    accept(id: string, sha: string, notes: string, project?: string) {
+      return this.ticketAction(id, "accept", { sha, notes }, project);
+    },
+    reject(id: string, sha: string, reason: string, project?: string) {
+      return this.ticketAction(id, "reject", { sha, reason }, project);
+    },
+    assign(id: string, owner: string, notes: string, project?: string) {
+      return this.ticketAction(id, "assign", notes ? { owner, notes } : { owner }, project);
     },
     postMessage(body: { from: string; text: string; to?: string; re?: string }) {
       posted.push(body);
@@ -199,5 +260,5 @@ export function fakeApi(parts: FakeParts = {}): Fake {
     },
   };
 
-  return { api: api as unknown as AtmanApi, posted, leadSet, calls };
+  return { api: api as unknown as AtmanApi, posted, leadSet, calls, actions };
 }

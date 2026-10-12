@@ -142,6 +142,7 @@ export interface Projects {
 /** board.json (the stable subset) */
 export interface AgentRow {
   name: string;
+  /** The snapshot's own word: busy, idle, DOWN, LIMITED, STALLED. */
   state: string;
   harness: string;
   lifecycle: string;
@@ -151,6 +152,20 @@ export interface AgentRow {
   limit: Record<string, unknown> | null;
   limit_until: string;
   auth_surface: { state: string; label: string; recovery?: { cmd?: string } | null };
+  /*
+   * Not contract on board.json ("other snapshot fields may change"), so every
+   * one is optional and the presence strip treats a missing value as not
+   * recorded. They are what the snapshot writes today.
+   */
+  /** Hours since the seat was last seen; null when never. */
+  seen_h?: number | null;
+  /** The ticket the seat's record is bound to. */
+  ticket?: string;
+  /** The API's sentence for adapter_state, e.g. "Adapter offline; directed work will remain queued." */
+  adapter_reason?: string;
+  roles?: string[];
+  provider_usage?: Record<string, unknown> | null;
+  auth?: string;
 }
 
 /**
@@ -213,6 +228,7 @@ export interface Board {
 export interface PlanNode {
   id: string;
   title: string;
+  /** working · review · done · blocked · ready · waiting · posted · reserved · hold · capture · discarded */
   phase: string;
   status: string;
   status_label: string;
@@ -231,6 +247,30 @@ export interface PlanNode {
   review: { verified: boolean; label: string; head?: string };
   artifact: { commit: string; branch: string; pr: string; sha: string };
   wait: Record<string, unknown> | null;
+  /*
+   * The Work payload's own fields, which plan.json leaves open. The one-screen
+   * view reads them for its card sentences; a missing one renders as the
+   * shorter sentence, never as an invented time or name.
+   */
+  role?: string;
+  kind?: string;
+  escalated?: boolean;
+  automated_action?: string;
+  who?: string;
+  who_kind?: string;
+  /** Hours since the last note (or the claim); null when unknown. */
+  since_update_h?: number | null;
+  stale?: boolean;
+  last_note?: { by: string; at: string; text: string } | null;
+  evidence?: string;
+  dispatch?: { to?: string; from?: string; age_h?: number | null } | null;
+  waiting?: string[];
+  hold?: boolean;
+  lane?: string;
+  claimed_at?: string;
+  done_at?: string;
+  created?: string;
+  acceptance?: { proof?: string } & Record<string, unknown>;
 }
 
 export interface Plan {
@@ -264,6 +304,8 @@ export interface Thread {
   oldest_id: string;
   total_in_window: number;
   archives: boolean;
+  /** The ticket filter the rows were read with (`?re=`), or "". */
+  re: string;
   error?: string;
 }
 
@@ -301,6 +343,8 @@ export interface Ticket {
   id: string;
   project: string;
   title: string;
+  /** The ticket's own text; "" when it has none. */
+  body: string;
   status: string;
   status_label: string;
   accepted: boolean;
@@ -336,7 +380,8 @@ export interface Lead {
 
 /** needs-you.json */
 export interface NeedsYouItem {
-  kind: "message" | "escalated";
+  /** message / escalated: prose asks. review / seat (T-1486): structured asks, still asks. */
+  kind: "message" | "escalated" | "review" | "seat";
   why: string;
   id: string;
   at: string;
@@ -345,7 +390,27 @@ export interface NeedsYouItem {
   re: string;
   text: string;
   state: "asked";
-  label: "asked (unstructured)";
+  label: "asked (unstructured)" | "review submitted" | "seat needs attention";
+}
+
+/** action-response.json — POST /api/v1/ticket/{id}/{accept,reject,assign} 200 body. */
+export interface ActionResponse {
+  ok: true;
+  action: "accept" | "reject" | "assign";
+  ticket: string;
+  project: string;
+  /** Who the record says acted — the operator the server resolved, not the request. */
+  by: string;
+  /** The sha the verdict bound to; "" for assign. */
+  sha: string;
+  at: string;
+  status: string;
+  status_label: string;
+  owner: string;
+  returned_to: string;
+  changed: string[];
+  released: string[];
+  started: string[];
 }
 
 export interface NeedsYou {

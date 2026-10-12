@@ -10,6 +10,8 @@
 
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020";
 
+import actionResponse from "../../../docs/api/schemas/action-response.json";
+import assignRequest from "../../../docs/api/schemas/assign-request.json";
 import board from "../../../docs/api/schemas/board.json";
 import common from "../../../docs/api/schemas/common.json";
 import error from "../../../docs/api/schemas/error.json";
@@ -22,8 +24,11 @@ import projects from "../../../docs/api/schemas/projects.json";
 import session from "../../../docs/api/schemas/session.json";
 import thread from "../../../docs/api/schemas/thread.json";
 import ticket from "../../../docs/api/schemas/ticket.json";
+import verdictRequest from "../../../docs/api/schemas/verdict-request.json";
 
 export const SCHEMAS: Record<string, Record<string, unknown>> = {
+  "action-response.json": actionResponse as Record<string, unknown>,
+  "assign-request.json": assignRequest as Record<string, unknown>,
   "board.json": board as Record<string, unknown>,
   "common.json": common as Record<string, unknown>,
   "error.json": error as Record<string, unknown>,
@@ -36,6 +41,7 @@ export const SCHEMAS: Record<string, Record<string, unknown>> = {
   "session.json": session as Record<string, unknown>,
   "thread.json": thread as Record<string, unknown>,
   "ticket.json": ticket as Record<string, unknown>,
+  "verdict-request.json": verdictRequest as Record<string, unknown>,
 };
 
 /** The `$id` base every schema shares, so relative `$ref`s resolve offline. */
