@@ -165,7 +165,7 @@ The sample chain (`T-002` after `T-001`) is the same contract as a real board:
    own branch (`atm review <id> --notes "..."`).
 4. **An independent accept is the gate** — a DIFFERENT seat records
    `atm accept <id> --sha <full 40-char review head> --notes "evidence"`;
-   no seat accepts its own work, and a moved head voids the accept.
+   no seat accepts its own work (a person or another seat does the human review), and a moved head voids the accept.
    `atm merge` is not silent auto-promote, and it may take only an
    accepted head. Success of a node can start the next unblocked child.
 
