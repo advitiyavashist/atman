@@ -1,0 +1,57 @@
+{
+  "title": "Live two-stage continuation",
+  "body": "Cause: live interrupted-provider acceptance probe. Change: two-stage artifact. Proof: finished.txt must contain exactly stage-one newline stage-two newline. Use /tmp/atman-t976-0923-bin/atm for EVERY board command, including self (record its output). You have one ticket only. If mid.txt does not exist: write mid.txt containing stage-one newline, commit it, record an atm update explaining the exact artifact and next action to write finished.txt from mid.txt plus stage-two newline. Then run sleep 120 in the FOREGROUND; the evaluator will kill this real process once the progress note is durable. Do not finish before interruption. On a subsequent run when mid.txt exists: preserve it, write finished.txt, independently assert exact contents, commit, atm sync then atm review with paths and test. No new tests framework; no provider spawning. Do not edit .tickets by hand.",
+  "role": "liveprobe",
+  "status": "review",
+  "deps": [],
+  "priority": 2,
+  "epic": "",
+  "sprint": "",
+  "needs": [],
+  "owner": "live-codex",
+  "created": "2026-09-23T03:45:06Z",
+  "updated": "2026-09-23T03:46:43Z",
+  "notes": [
+    {
+      "by": "live-codex",
+      "at": "2026-09-23T03:45:38Z",
+      "text": "Committed mid.txt containing exactly stage-one followed by newline. atm self recorded: seat live-codex, script /private/tmp/atman-t976-0923-source/tickets.py, CLI /tmp/atman-t976-0923-bin/atm. Next action after interruption: preserve mid.txt, write finished.txt from mid.txt plus stage-two newline, independently assert exact contents, commit, atm sync, then atm review."
+    },
+    {
+      "by": "live-codex",
+      "at": "2026-09-23T03:46:24Z",
+      "text": "Preserved committed mid.txt and created finished.txt from it plus stage-two newline. Independent byte assertions passed for both files and confirmed mid.txt matches HEAD. atm self: seat live-codex; script /private/tmp/atman-t976-0923-source/tickets.py; CLI /tmp/atman-t976-0923-bin/atm; persistent no (no native endpoint). Preparing commit and review."
+    },
+    {
+      "by": "live-codex",
+      "at": "2026-09-23T03:46:27Z",
+      "text": "REVIEW: live-codex@a829f64 -- Added finished.txt with exactly stage-one newline stage-two newline; preserved mid.txt and its original commit. Independent Python byte assertions passed for finished.txt and mid.txt, including comparison of mid.txt to HEAD before commit. No test framework added. Accept the pinned review SHA; no further artifact changes needed."
+    },
+    {
+      "by": "live-codex",
+      "at": "2026-09-23T03:46:43Z",
+      "text": "Review pinned at a829f64e28d94fcd3ee98929564c1fdc574a98bc; exact-byte assertions passed. stuck: atm sync attempted but refused because no origin remote is configured. Reported to boss for resolution alongside independent acceptance request; no commits after review."
+    }
+  ],
+  "id": "T-001",
+  "claimed_at": "2026-09-23T03:45:21Z",
+  "done_at": "",
+  "owner_generation": 1,
+  "revoked_owners": [],
+  "owner_lease": {
+    "generation": 1,
+    "owner": "live-codex",
+    "harness": "codex",
+    "issued_at": "2026-09-23T03:45:21.023277+00:00",
+    "reason": "claim",
+    "previous_owner": "",
+    "previous_generation": 0,
+    "revoked_owners": []
+  },
+  "review_at": "2026-09-23T03:46:27Z",
+  "commit": "live-codex@a829f64",
+  "branch": "live-codex",
+  "repo": "<tmp>/t976-journeys-1x_rtu5v/live/.git",
+  "repo_source": "cwd",
+  "review_head": "a829f64e28d94fcd3ee98929564c1fdc574a98bc"
+}

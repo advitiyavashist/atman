@@ -31,7 +31,7 @@ SCOPE_LIMIT = 360
 # One line, carried by EVERY worker turn (not just the first), so the rule that
 # decides whether work counts is never only in a prompt the seat has forgotten.
 GATE_ONE_LINER = (
-    "ACCEPT GATE: your commit lands only when a DIFFERENT seat runs "
+    "ACCEPT GATE: `atm review` pins the review head; your commit lands only when a DIFFERENT seat runs "
     "`atm accept <id> --sha <full 40-char review head> --notes \"...\"`; you cannot accept your own "
     "ticket, a commit after `atm review` moves the head and voids the accept, and no ticket that "
     "depends on yours opens until the accept lands."

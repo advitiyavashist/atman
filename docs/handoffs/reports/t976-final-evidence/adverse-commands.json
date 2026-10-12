@@ -1,0 +1,885 @@
+[
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--gate"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/stub-auth-dispatch",
+    "agent": "boss",
+    "code": 0,
+    "out": "atm quickstart --gate: one ticket, two seats, and the gate between them.\nscratch: <tmp>/t976-journeys-h4w9kz5p/stub-auth-dispatch/tmp/atm-quickstart-gate-8vz9k7a4\n         (your repo and your board are not touched -- this all happens in there)\n1/8 preflight claude login is live (ready) -- same check `atm dispatch` makes\n2/8 repo      git init + first commit on main (<scratch>/repo)\n3/8 board     atm init -> <scratch>/repo/.tickets (a board of its own)\n4/8 seats     alice (author) and bob (reviewer) joined, harness=claude\n5/8 tickets   T-001 (the work) and T-002 (waits for T-001)\n6/8 dispatch  T-001 reserved for alice and claimed; running claude now...\n          | claude made the commit\n          | alice committed d245b86\n7/8 gate      T-002 blocked: T-001 has no accept from another seat\n          | blocked: T-002 -- T-001 marked done without verification; accept it or reopen\n          | atm claim T-002 (as bob) refused: T-002: T-001 marked done without verification; accept it or reopen\n8/8 released  T-002 released by bob accepting d245b86\n          | author alice != evaluator bob  (the board record, not a claim)\n          | T-001 accepted d245b866b1a1a77e3810186502eb4a18cfd2adae by bob\n          | unblocked: T-002\n          | started: T-002\nusage:  claude unknown \u00b7 UNKNOWN \u00b7 no data\n\nwhat happened: alice committed d245b86 and closed T-001; T-002 stayed shut until bob --\n               a different seat -- accepted that exact sha. No seat releases its own work.\nin your repo:  cd <your repo> && atm quickstart --agent <you>   (then: atm next, atm review, atm accept)\nwhere to look: atm agents   (seats, harness, usage)   |   atm ui\nscratch kept:  <tmp>/t976-journeys-h4w9kz5p/stub-auth-dispatch/tmp/atm-quickstart-gate-8vz9k7a4   (rm -rf it whenever; nothing of yours was touched)\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--gate"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/missing-binary",
+    "agent": "boss",
+    "code": 0,
+    "out": "atm quickstart --gate: one ticket, two seats, and the gate between them.\n\nno coding CLI found on PATH (looked for: claude, codex, cursor-agent, agent).\ninstall one (Claude Code, Codex, or the Cursor CLI), then: atm quickstart --gate\n\nWALKTHROUGH ONLY -- nothing below ran. No repo, no board, no commit,\nno accept record, and no sha (a sha can only come from a real commit).\n  would 1/8 preflight check that a coding CLI has a live login (atm's own dispatch preflight)\n  would 2/8 scratch   make a throwaway git repo + board in a temp dir (never your repo, never your board)\n  would 3/8 board     atm init there, then commit the scaffolding\n  would 4/8 seats     atm join alice (author) and bob (reviewer) -- two different seats\n  would 5/8 tickets   atm create T-001, then T-002 --deps T-001\n  would 6/8 dispatch  atm dispatch T-001 --to alice, then a coding CLI runs and commits a one-line change\n  would 7/8 gate      atm done T-001 would print: blocked: T-002 -- T-001 marked done without verification; accept it or reopen\n  would 8/8 accept    atm accept T-001 --sha <the sha alice actually committed> as bob would release T-002\n\nThat was a WALKTHROUGH, not a run: nothing above happened and no accept exists.\nRun it for real:  atm quickstart --gate\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--gate"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/missing-auth",
+    "agent": "boss",
+    "code": 0,
+    "out": "atm quickstart --gate: one ticket, two seats, and the gate between them.\n\npreflight: claude is logged out -- run `claude auth login`, then `atm harness auth <seat>`\nlog in with:  claude auth login\nthen verify:  atm harness auth <seat>\n\nWALKTHROUGH ONLY -- nothing below ran. No repo, no board, no commit,\nno accept record, and no sha (a sha can only come from a real commit).\nwhy: preflight: claude is logged out -- run `claude auth login`, then `atm harness auth <seat>`\nlog in first: claude auth login\n  would 1/8 preflight check that claude has a live login (atm's own dispatch preflight)\n  would 2/8 scratch   make a throwaway git repo + board in a temp dir (never your repo, never your board)\n  would 3/8 board     atm init there, then commit the scaffolding\n  would 4/8 seats     atm join alice (author) and bob (reviewer) -- two different seats\n  would 5/8 tickets   atm create T-001, then T-002 --deps T-001\n  would 6/8 dispatch  atm dispatch T-001 --to alice, then claude runs and commits a one-line change\n  would 7/8 gate      atm done T-001 would print: blocked: T-002 -- T-001 marked done without verification; accept it or reopen\n  would 8/8 accept    atm accept T-001 --sha <the sha alice actually committed> as bob would release T-002\n\nThat was a WALKTHROUGH, not a run: nothing above happened and no accept exists.\nRun it for real once logged in:  atm quickstart --gate\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "init",
+      "-q",
+      "-b",
+      "main"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "init"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--agent",
+      "boss",
+      "--roles",
+      "backend"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "board: <tmp>/t976-journeys-h4w9kz5p/race/.tickets\n  resolved from the git worktree cwd is in (<tmp>/t976-journeys-h4w9kz5p/race)\nwrote: <tmp>/t976-journeys-h4w9kz5p/race/.cursor/rules/tickets.mdc\nwrote: <tmp>/t976-journeys-h4w9kz5p/race/AGENTS.md\nwrote: <tmp>/t976-journeys-h4w9kz5p/race/.gitignore\nwrote: <tmp>/t976-journeys-h4w9kz5p/race/.tickets/MASTER.md\nbound: `atm` run from <tmp>/t976-journeys-h4w9kz5p/race resolves to this board (`tickets` is a compatibility alias).\n\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.\nCodex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.\n\nboard: <tmp>/t976-journeys-h4w9kz5p/race/.tickets\nepic:  E-001  Sample epic: a first slice end to end\n  T-001  Sample: design the data model              ready now\n  T-002  Sample: build the API on top of the model  after T-001\n  T-003  Sample: put a screen on the API            after T-002\njoined as boss  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral  alias=-\n\nThe three commands that matter:\n  TICKET_AGENT=boss atm next                      claim the next ready ticket\n  TICKET_AGENT=boss atm update <id> \"...\"         say where you are, at least every 45 min\n  TICKET_AGENT=boss atm review <id> --notes \"...\" hand it back with an exact artifact\n  (`tickets` is a compatibility alias for the same CLI.)\n\nFeel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket\n               stays shut until a DIFFERENT seat accepts the commit)\n\nSee it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)\nLearn it: atm guide   |   docs/first-session.md   |   README.md\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--remove"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "removed 3 sample ticket(s) (T-001, T-002, T-003)\nepic E-001 left in place (it may hold your own work now)\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "master",
+      "take"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "boss is master now. Run `atm master` for the briefing.\nWARNING: boss took master with no live endpoint. Mail stays queued until a native session or persist watcher is online.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "objective",
+      "Produce verified CSV statistics",
+      "--exit",
+      "exact row count accepted"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "objective set\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "onboard"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "join",
+      "alice",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "alice",
+    "code": 0,
+    "out": "joined as alice  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check alice` proves it works\nboard: <tmp>/t976-journeys-h4w9kz5p/race/.tickets\nmaster: boss\ninbox: 1 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/race worktree add .worktrees/alice-work -b alice-work\n  cd <tmp>/t976-journeys-h4w9kz5p/race/.worktrees/alice-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "join",
+      "bob",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "bob",
+    "code": 0,
+    "out": "joined as bob  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check bob` proves it works\nboard: <tmp>/t976-journeys-h4w9kz5p/race/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/race worktree add .worktrees/bob-work -b bob-work\n  cd <tmp>/t976-journeys-h4w9kz5p/race/.worktrees/bob-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "create",
+      "Concurrent claim target",
+      "--role",
+      "backend",
+      "--body",
+      "Cause: journey probe. Change: persisted artifact. Proof: independent assertion."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "boss",
+    "code": 0,
+    "out": "created T-001  Concurrent claim target\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "claim",
+      "T-001"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "bob",
+    "code": 1,
+    "out": "",
+    "err": "T-001 is already taken\n"
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "claim",
+      "T-001"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "alice",
+    "code": 0,
+    "out": "[>] IN PROGRESS T-001  Concurrent claim target  (role=backend; owner=alice)\n\nRead this briefing before editing:\n  <tmp>/t976-journeys-h4w9kz5p/race/.tickets/MASTER.md\nTime: active 0m, waited 0m before claim, last update 0m ago\nlane: ready\n\nCause: journey probe. Change: persisted artifact. Proof: independent assertion.\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/race worktree add .worktrees/alice-work -b alice-work\n  cd <tmp>/t976-journeys-h4w9kz5p/race/.worktrees/alice-work\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "claim",
+      "T-001"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/race",
+    "agent": "alice",
+    "code": 1,
+    "out": "",
+    "err": "T-001 is already taken\n"
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "init",
+      "-q",
+      "-b",
+      "main"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "init"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--agent",
+      "boss",
+      "--roles",
+      "backend"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "board: <tmp>/t976-journeys-h4w9kz5p/failed-check/.tickets\n  resolved from the git worktree cwd is in (<tmp>/t976-journeys-h4w9kz5p/failed-check)\nwrote: <tmp>/t976-journeys-h4w9kz5p/failed-check/.cursor/rules/tickets.mdc\nwrote: <tmp>/t976-journeys-h4w9kz5p/failed-check/AGENTS.md\nwrote: <tmp>/t976-journeys-h4w9kz5p/failed-check/.gitignore\nwrote: <tmp>/t976-journeys-h4w9kz5p/failed-check/.tickets/MASTER.md\nbound: `atm` run from <tmp>/t976-journeys-h4w9kz5p/failed-check resolves to this board (`tickets` is a compatibility alias).\n\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.\nCodex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.\n\nboard: <tmp>/t976-journeys-h4w9kz5p/failed-check/.tickets\nepic:  E-001  Sample epic: a first slice end to end\n  T-001  Sample: design the data model              ready now\n  T-002  Sample: build the API on top of the model  after T-001\n  T-003  Sample: put a screen on the API            after T-002\njoined as boss  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral  alias=-\n\nThe three commands that matter:\n  TICKET_AGENT=boss atm next                      claim the next ready ticket\n  TICKET_AGENT=boss atm update <id> \"...\"         say where you are, at least every 45 min\n  TICKET_AGENT=boss atm review <id> --notes \"...\" hand it back with an exact artifact\n  (`tickets` is a compatibility alias for the same CLI.)\n\nFeel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket\n               stays shut until a DIFFERENT seat accepts the commit)\n\nSee it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)\nLearn it: atm guide   |   docs/first-session.md   |   README.md\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--remove"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "removed 3 sample ticket(s) (T-001, T-002, T-003)\nepic E-001 left in place (it may hold your own work now)\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "master",
+      "take"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "boss is master now. Run `atm master` for the briefing.\nWARNING: boss took master with no live endpoint. Mail stays queued until a native session or persist watcher is online.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "objective",
+      "Produce verified CSV statistics",
+      "--exit",
+      "exact row count accepted"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "objective set\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "onboard"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "join",
+      "alice",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "alice",
+    "code": 0,
+    "out": "joined as alice  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check alice` proves it works\nboard: <tmp>/t976-journeys-h4w9kz5p/failed-check/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/failed-check worktree add .worktrees/alice-work -b alice-work\n  cd <tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "join",
+      "bob",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "bob",
+    "code": 0,
+    "out": "joined as bob  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check bob` proves it works\nboard: <tmp>/t976-journeys-h4w9kz5p/failed-check/.tickets\nmaster: boss\ninbox: 1 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/failed-check worktree add .worktrees/bob-work -b bob-work\n  cd <tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/bob-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "create",
+      "Invalid result",
+      "--role",
+      "backend",
+      "--body",
+      "Cause: journey probe. Change: persisted artifact. Proof: independent assertion."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "created T-001  Invalid result\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "worktree",
+      "add",
+      "<tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice",
+      "-b",
+      "alice"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "HEAD is now at a0c3966 onboard\n",
+    "err": "Preparing worktree (new branch 'alice')\n"
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "next"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice",
+    "agent": "alice",
+    "code": 0,
+    "out": "usage  no provider read yet (atm harness usage)\n[>] IN PROGRESS T-001  Invalid result  (role=backend; owner=alice)\n\nRead this briefing before editing:\n  <tmp>/t976-journeys-h4w9kz5p/failed-check/.tickets/MASTER.md\n\nBoard: <tmp>/t976-journeys-h4w9kz5p/failed-check/.tickets  (cwd is <tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice)\nTime: active 0m, waited 0m before claim, last update 0m ago\nlane: ready\n\nCause: journey probe. Change: persisted artifact. Proof: independent assertion.\n\nPost progress with `atm update T-001 \"...\"` at least every 45 min; finish with `atm review T-001 --notes \"exact SHA, paths, decisions\"`.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "bad result"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "rev-parse",
+      "HEAD"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "50747311eb79df7bdb83a3a130bd15cc9ac0f54c\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "review",
+      "T-001",
+      "--notes",
+      "Deliberately wrong fixture"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check/.worktrees/alice",
+    "agent": "alice",
+    "code": 0,
+    "out": "pinned alice@5074731 in <tmp>/t976-journeys-h4w9kz5p/failed-check/.git (this checkout -- pass --artifact <dir> if the deliverable is in another repo)\nreview_head: 50747311eb79df7bdb83a3a130bd15cc9ac0f54c\nT-001 -> IN REVIEW after 0m of work; master (boss) notified. Claim your next ticket.\nwake: boss -> inbox-posted\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "show",
+      "50747311eb79df7bdb83a3a130bd15cc9ac0f54c:stats.json"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "boss",
+    "code": 0,
+    "out": "{\"rows\":999}\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "reject",
+      "T-001",
+      "--sha",
+      "50747311eb79df7bdb83a3a130bd15cc9ac0f54c",
+      "--reason",
+      "Check failed: expected rows 3, got 999"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/failed-check",
+    "agent": "bob",
+    "code": 0,
+    "out": "T-001 rejected 50747311eb79df7bdb83a3a130bd15cc9ac0f54c by bob\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "init",
+      "-q",
+      "-b",
+      "main"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "init"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--agent",
+      "boss",
+      "--roles",
+      "backend"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "board: <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets\n  resolved from the git worktree cwd is in (<tmp>/t976-journeys-h4w9kz5p/transfer)\nwrote: <tmp>/t976-journeys-h4w9kz5p/transfer/.cursor/rules/tickets.mdc\nwrote: <tmp>/t976-journeys-h4w9kz5p/transfer/AGENTS.md\nwrote: <tmp>/t976-journeys-h4w9kz5p/transfer/.gitignore\nwrote: <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets/MASTER.md\nbound: `atm` run from <tmp>/t976-journeys-h4w9kz5p/transfer resolves to this board (`tickets` is a compatibility alias).\n\nClaude Code: install a scoped hook with `atm hooks claude --agent <name>`.\nCodex and Cursor read AGENTS.md; Cursor also gets .cursor/rules/tickets.mdc.\n\nboard: <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets\nepic:  E-001  Sample epic: a first slice end to end\n  T-001  Sample: design the data model              ready now\n  T-002  Sample: build the API on top of the model  after T-001\n  T-003  Sample: put a screen on the API            after T-002\njoined as boss  roles=['backend']  can=-  cost=medium  harness=claude (default)  wake=task-only  lifecycle=ephemeral  alias=-\n\nThe three commands that matter:\n  TICKET_AGENT=boss atm next                      claim the next ready ticket\n  TICKET_AGENT=boss atm update <id> \"...\"         say where you are, at least every 45 min\n  TICKET_AGENT=boss atm review <id> --notes \"...\" hand it back with an exact artifact\n  (`tickets` is a compatibility alias for the same CLI.)\n\nFeel the gate: atm quickstart --gate   (60s, throwaway dir: a dependent ticket\n               stays shut until a DIFFERENT seat accepts the commit)\n\nSee it: atm ui        ->  http://127.0.0.1:8765   (read-only, auto-refresh)\nLearn it: atm guide   |   docs/first-session.md   |   README.md\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "quickstart",
+      "--remove"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "removed 3 sample ticket(s) (T-001, T-002, T-003)\nepic E-001 left in place (it may hold your own work now)\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "master",
+      "take"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "boss is master now. Run `atm master` for the briefing.\nWARNING: boss took master with no live endpoint. Mail stays queued until a native session or persist watcher is online.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "objective",
+      "Produce verified CSV statistics",
+      "--exit",
+      "exact row count accepted"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "objective set\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "onboard"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "join",
+      "alice",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "alice",
+    "code": 0,
+    "out": "joined as alice  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check alice` proves it works\nboard: <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/transfer worktree add .worktrees/alice-work -b alice-work\n  cd <tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/alice-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "join",
+      "bob",
+      "--roles",
+      "backend",
+      "--harness",
+      "custom",
+      "--cmd",
+      "/usr/bin/true {prompt_file}"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "bob",
+    "code": 0,
+    "out": "joined as bob  roles=['backend']  can=-  cost=medium  harness=custom  wake=task-only  lifecycle=ephemeral  alias=-\ncmd: /usr/bin/true {prompt_file}\nnote: 'custom' is not a built-in harness, so it is run as the command itself; `atm harness check bob` proves it works\nboard: <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets\nmaster: boss\ninbox: 1 unread (atm inbox)\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/transfer worktree add .worktrees/bob-work -b bob-work\n  cd <tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/bob-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "create",
+      "Transfer harness identity",
+      "--role",
+      "backend",
+      "--body",
+      "Cause: journey probe. Change: persisted artifact. Proof: independent assertion."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "created T-001  Transfer harness identity\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "worktree",
+      "add",
+      "<tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/alice",
+      "-b",
+      "alice"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "HEAD is now at f2d7745 onboard\n",
+    "err": "Preparing worktree (new branch 'alice')\n"
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "next"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/alice",
+    "agent": "alice",
+    "code": 0,
+    "out": "usage  no provider read yet (atm harness usage)\n[>] IN PROGRESS T-001  Transfer harness identity  (role=backend; owner=alice)\n\nRead this briefing before editing:\n  <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets/MASTER.md\n\nBoard: <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets  (cwd is <tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/alice)\nTime: active 0m, waited 0m before claim, last update 0m ago\nlane: ready\n\nCause: journey probe. Change: persisted artifact. Proof: independent assertion.\n\nPost progress with `atm update T-001 \"...\"` at least every 45 min; finish with `atm review T-001 --notes \"exact SHA, paths, decisions\"`.\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "add",
+      "."
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "git",
+      "-c",
+      "user.name=T976 probe",
+      "-c",
+      "user.email=t976@example.invalid",
+      "commit",
+      "-qm",
+      "intermediate"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/alice",
+    "agent": "boss",
+    "code": 0,
+    "out": "",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "join",
+      "carol",
+      "--roles",
+      "backend",
+      "--harness",
+      "codex"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "carol",
+    "code": 0,
+    "out": "joined as carol  roles=['backend']  can=-  cost=medium  harness=codex  wake=task-only  lifecycle=ephemeral  alias=-\nboard: <tmp>/t976-journeys-h4w9kz5p/transfer/.tickets\nmaster: boss\n\nRULE: you are on branch 'main' in the primary worktree. Work on your own tree:\n  git -C <tmp>/t976-journeys-h4w9kz5p/transfer worktree add .worktrees/carol-work -b carol-work\n  cd <tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/carol-work\n\nLoop:  atm master  ->  atm next  ->  work + commit  ->  atm update <id> \"...\" (every 45 min)  ->  atm review <id> --notes \"<exact artifact>\"  ->  atm next\nWorkers stop at `atm review` with an exact artifact. Coordinator close is `atm accept`, then `atm merge`, then `atm done`.\nFull instructions: atm connect --worker\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "assign",
+      "T-001",
+      "--owner",
+      "carol"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer",
+    "agent": "boss",
+    "code": 0,
+    "out": "T-001: owner=carol\n",
+    "err": ""
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-bin/atm",
+      "review",
+      "T-001",
+      "--notes",
+      "revoked owner"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/transfer/.worktrees/alice",
+    "agent": "alice",
+    "code": 1,
+    "out": "",
+    "err": "T-001 is owned by carol under generation 2; alice cannot review (stale ownership after restart or reassignment)\n"
+  },
+  {
+    "args": [
+      "/tmp/atman-t976-0923-source/install.sh",
+      "--prefix",
+      "<tmp>/t976-journeys-h4w9kz5p/stale/bin"
+    ],
+    "cwd": "<tmp>/t976-journeys-h4w9kz5p/stale",
+    "agent": "boss",
+    "code": 1,
+    "out": "Development install: use --live-release --ref <sha> for the shared live CLI.\n",
+    "err": "install.sh: refusing to overwrite existing <tmp>/t976-journeys-h4w9kz5p/stale/bin/atm (it is not a\nsymlink to this checkout's tickets.py -- something else owns it).\nUse --prefix DIR (or PREFIX=DIR) for an isolated install, or --force\nto replace it anyway.\n"
+  }
+]

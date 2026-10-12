@@ -1399,7 +1399,8 @@ def _alloc(directory, prefix, width, record):
         return record
 
 
-def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="", needs=None):
+def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="",
+           needs=None, target_repo=""):
     return _alloc(board, "T", 3, {
         "title": title,
         "body": body,
@@ -1414,7 +1415,42 @@ def create(board, title, body="", role="", deps=None, priority=2, epic="", sprin
         "created": now(),
         "updated": now(),
         "notes": [],
+        **_target_repo_stamp(target_repo),
     })
+
+
+def _target_repo_stamp(explicit=""):
+    """T-1135: record which repository a ticket's deliverable lives in.
+
+    Defaults to the repository the ticket was typed in, which is the right
+    answer whenever an author files follow-up work from the checkout they
+    are working in. It is a guess, so `atm create --target-repo` and
+    `atm assign --target-repo` can state or correct it, and an unset value
+    means "unknown", which keeps the ticket claimable from anywhere.
+
+    Deliberately NOT the `repo` field: that one is the review pin's
+    repository. `atm done` refuses to close from anywhere else and the
+    merge auto-close reads it as evidence about a reviewed sha, so a
+    create-time guess written there would fence off honest closes.
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return {"target_repo": explicit}
+    cwd = os.getcwd()
+    if cwd not in _TARGET_REPO_CACHE:
+        # One probe per directory per process: `atm plan` creates a whole
+        # graph in one run, and 40 tickets should not mean 40 `git config`
+        # calls. Scoped to this process, so a test that rewrites a remote
+        # between CLI invocations still sees the change.
+        try:
+            _TARGET_REPO_CACHE[cwd] = _repo_routing().checkout_repo(cwd)
+        except Exception:
+            _TARGET_REPO_CACHE[cwd] = ""
+    origin = _TARGET_REPO_CACHE[cwd]
+    return {"target_repo": origin} if origin else {}
+
+
+_TARGET_REPO_CACHE = {}
 
 
 # --------------------------------------------------------------------------
@@ -2558,6 +2594,18 @@ def _refuse_preflight(board, owner, harness, verb):
     return result
 
 
+def _repo_routing():
+    try:
+        from ticket_board import repo_routing as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import repo_routing as m
+        return m
+
+
 def _route_headroom():
     try:
         from ticket_board import route_headroom as m
@@ -3135,7 +3183,8 @@ def cmd_create(a, board):
     cur = active_sprint(board)
     sprint = a.sprint if a.sprint is not None else (cur["id"] if cur and a.in_sprint else "")
     t = create(board, a.title, a.body or "", a.role or "", deps, a.priority,
-               a.epic or "", sprint, _ids(a.needs))
+               a.epic or "", sprint, _ids(a.needs),
+               getattr(a, "target_repo", "") or "")
     pending = {}
     for other in blocks:
         o = load(board, other)
@@ -3869,7 +3918,7 @@ def cmd_board(a, board):
         print(
             "Shared across Claude/Codex/Cursor. `atm next` claims one atomically; "
             "`atm review <id> --notes \"...\"` submits it. A dependent opens only when a "
-            "DIFFERENT seat runs `atm accept <id> --sha <sha>` -- `atm done` alone releases "
+            "DIFFERENT seat runs `atm accept <id> --sha <full 40-char review head>` -- `atm done` alone releases "
             "nothing (atm quickstart --gate shows it)."
         )
     owner = whoami()
@@ -4499,6 +4548,7 @@ def cmd_next(a, board):
     ready = [t for t in ready if not _ticket_on_hold(t)]
     ready = [t for t in ready if not _reopen_blocks_automation(board, t)]
     ready = [t for t in ready if not _worktree_gc().is_automated(t)]
+    ready, repo_miss = _repo_routing().filter_for_checkout(ready, os.getcwd())
     cur = active_sprint(board)
     cur_id = cur["id"] if cur else None
     rank = cost_rank(board, owner)
@@ -4553,14 +4603,26 @@ def cmd_next(a, board):
     role_miss, reserved_miss = _next_refusal_parts(
         ready_all, roles, owner, steal_id, board)
     parts = []
+    if repo_miss:
+        # The attribution can be a create-time guess, so name the escape
+        # hatches: an explicit claim still works, and "-" clears a wrong stamp.
+        parts.append(
+            "%d ticket(s) whose repository is not this checkout's: %s"
+            " (claim one explicitly if it really is yours, or correct it with"
+            " `atm assign <id> --target-repo -`)" % (
+                len(repo_miss), ", ".join(t["id"] for t in repo_miss)))
     if role_miss:
         parts.append("%d ready for other roles: %s" % (
             len(role_miss), ", ".join(t["id"] for t in role_miss)))
     if reserved_miss:
         parts.append("%d reserved for other agents: %s" % (
             len(reserved_miss), ", ".join(t["id"] for t in reserved_miss)))
-    if roles is not None and parts:
-        print("no ticket for roles %s; %s" % (roles, "; ".join(parts)))
+    if parts:
+        # A seat that registered no roles has roles None; say that instead
+        # of printing "no ticket for roles None" at it.
+        who = (("roles %s" % (roles,)) if roles else
+               "this seat (no roles registered, so every role was considered)")
+        print("no ticket for %s; %s" % (who, "; ".join(parts)))
         sys.exit(1)
     cyc = find_cycle(tickets)
     if cyc:
@@ -7403,6 +7465,17 @@ def cmd_assign(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
+    if getattr(a, "target_repo", None) is not None:
+        # T-1135: attribute an existing ticket so automatic claims stop
+        # offering it to seats checked out on a different repository. "-"
+        # clears it, which makes the ticket claimable from anywhere again.
+        want = a.target_repo.strip()
+        if want and want != "-":
+            t["target_repo"] = want
+            changed.append("target_repo=%s" % want)
+        else:
+            t.pop("target_repo", None)
+            changed.append("target_repo=(unknown)")
     if getattr(a, "worktree", None) is not None:
         wt = (a.worktree or "").strip()
         if wt:
@@ -7730,7 +7803,14 @@ CLI: `atm` (the `tickets` command is an alias).
 Run `atm harness available` to probe every catalog row (missing is a row).
 It auto-checks usage; unsupported or missing remaining/reset is unknown, not exhausted.
 When they name tasks, use `atm plan` so deps are real `--after` edges.
-Unattended persist ends at a reviewable SHA; human review is the gate.
+Unattended persist ends at a reviewable SHA. That SHA is not the end:
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 """
 
 # Probe-only catalog for a new board. Codex stays listed with unknown usage.
@@ -8055,8 +8135,9 @@ objective; drain the review queue. Show `atm graph` / `atm map`.
 If HEALTH flags prose-only deps, wire `atm dep` instead of leaving
 them in the body.
 
-Unattended persist ends at `atm review` (reviewable SHA); human review is
-the gate. Capture / sound / dispatch (Fatih loop on this board, not a plans/
+Unattended persist ends at `atm review` (reviewable SHA); the gate is a
+DIFFERENT seat recording `atm accept <id> --sha <full 40-char review head>`,
+never the author. Capture / sound / dispatch (Fatih loop on this board, not a plans/
 tree): `atm capture`, `atm sound`, CoS `atm dispatch --harness …`,
 `atm pr-sync` after the PR is merged. CEO does not `atm next`.
 
@@ -8117,20 +8198,26 @@ HANDOVER dated 2026-09-08 is historical, not live authority. Live:
 3. You may create, split, re-wire and assign tickets (`create --blocks`,
    `dep`, `assign`, `plan`). Extending the graph is expected, not exceptional.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `atm done` refuses from main or with uncommitted files.
+   `atm review` refuses from main or with uncommitted files.
 5. Post `atm update <id> "..."` at least every 45 minutes and at each
    milestone. Silence longer than that is treated as a timeout.
-6. `done --notes` must include branch@sha (added automatically), the paths
-   you touched, and every decision a dependent ticket must match. Then merge
-   (or open the PR) before claiming the next ticket. Workers submit
-   `atm review` (sounded code tickets need `--pr`); master `atm merge`
-   then `atm done`. `atm pr-sync` reports ready-to-close and does not
-   self-done.
+6. Workers commit, run `atm sync`, then submit `atm review --notes` with paths,
+   tests and decisions dependents must match (sounded code tickets need `--pr`).
+   The integrator follows the accept gate below before `atm merge`.
+   `atm pr-sync` reports integration evidence; it does not supply an accept.
 7. Set `TICKET_AGENT` to your own name so the board can tell agents apart.
 8. Sound before staff: `atm capture` is not claimable. `atm sound`
    fills cause/change/proof/deps. CoS `atm dispatch`. CEO does not
    `atm next`.
 
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 
 ## Sprint plan
 (goals per sprint; `atm sprint list` has the live numbers)
@@ -8267,7 +8354,7 @@ def cmd_master(a, board):
     if queue:
         print("")
         print("REVIEW QUEUE (%d) -- coordinator close is three distinct steps: "
-              "`atm accept <id> --sha <exact>`, then `atm merge`, then `atm done <id>`:" % len(queue))
+              "`atm accept <id> --sha <full 40-char review head>`, then `atm merge`, then `atm done <id>`:" % len(queue))
         for t in queue:
             print("  %s @%-12s %-46s %s  waiting %s%s" % (
                 t["id"], t.get("owner", "?"), t["title"][:46],
@@ -11136,6 +11223,145 @@ def _traj_summary(events):
     return by_ticket
 
 
+def _traj_absolute_uncollapsed(path):
+    """Make absolute without collapsing ``..`` (keeps symlink parents visible)."""
+    path = os.path.expanduser(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.getcwd(), path)
+
+
+def _traj_nearest_existing_ancestor(path):
+    """Walk parents until a lexically-existing path is found (or the root).
+
+    Does not use abspath/normpath: those collapse ``..`` by string and miss
+    symlink escapes into the board (``dlink/../agents/alice.json``).
+    """
+    cur = _traj_absolute_uncollapsed(path)
+    while not os.path.lexists(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return cur
+
+
+def _traj_resolved_path_for_board_guard(path):
+    """realpath(nearest existing ancestor) + remaining path components."""
+    abs_path = _traj_absolute_uncollapsed(path)
+    ancestor = _traj_nearest_existing_ancestor(abs_path)
+    if not os.path.lexists(ancestor):
+        return os.path.normpath(abs_path)
+    real_anc = os.path.realpath(ancestor)
+    if abs_path == ancestor:
+        return real_anc
+    if abs_path.startswith(ancestor):
+        rest = abs_path[len(ancestor):].lstrip(os.sep)
+    else:
+        rest = os.path.basename(abs_path)
+    if not rest:
+        return real_anc
+    return os.path.normpath(os.path.join(real_anc, rest))
+
+
+def _traj_path_is_under_board_samefile(path, board):
+    """True when `path` is the board or a descendant, compared by inode.
+
+    Resolves symlink ancestors first, then samefile-walks so case aliases on
+    macOS APFS/HFS+ (``.TICKETS`` vs ``.tickets``) still match by dev/inode.
+    """
+    board_root = os.path.realpath(board)
+    cur = _traj_resolved_path_for_board_guard(path)
+    while True:
+        if os.path.lexists(cur):
+            try:
+                if os.path.samefile(cur, board_root):
+                    return True
+            except OSError:
+                pass
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _traj_export_path_inside_board(out, board):
+    """True when `trajectories export --out` would land under the active board.
+
+    Mirror of ticket_board.trajectories.export_path_inside_board (T-1140).
+    Root tickets.py ships alone, so this copy cannot import the package helper.
+    Symlink ``--out`` / ``<out>.tmp`` are refused; path checks resolve symlink
+    ancestors before ``..`` collapse, then samefile/dev-inode for case aliases.
+    """
+    if not out or not board:
+        return False
+    try:
+        if os.path.islink(out) or os.path.islink(out + ".tmp"):
+            return True
+        return (
+            _traj_path_is_under_board_samefile(out, board)
+            or _traj_path_is_under_board_samefile(out + ".tmp", board)
+        )
+    except (OSError, ValueError):
+        return True
+
+
+def _refuse_traj_export_inside_board(out, board):
+    if _traj_export_path_inside_board(out, board):
+        sys.exit(
+            "REFUSING: trajectories export --out must live outside the ticket "
+            "board (would replace board records): %s" % out
+        )
+
+
+def _traj_open_export_tmp(tmp):
+    """Create ``<out>.tmp`` with O_CREAT|O_EXCL|O_NOFOLLOW (no symlink follow)."""
+    if os.path.islink(tmp):
+        sys.exit(
+            "REFUSING: trajectories export temp path must not be a symlink "
+            "(would follow into the board): %s" % tmp
+        )
+    if os.path.lexists(tmp):
+        if os.path.isdir(tmp) and not os.path.islink(tmp):
+            sys.exit(
+                "REFUSING: trajectories export temp path is a directory: %s" % tmp
+            )
+        os.unlink(tmp)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if nofollow:
+        flags |= nofollow
+    try:
+        return os.open(tmp, flags, 0o644)
+    except OSError as exc:
+        sys.exit(
+            "REFUSING: cannot create trajectories export temp file safely: "
+            "%s (%s)" % (tmp, exc)
+        )
+
+
+def _traj_write_export_file(out, events):
+    """Write JSONL events to --out via a nofollow temp file + os.replace."""
+    if os.path.islink(out):
+        sys.exit(
+            "REFUSING: trajectories export --out must not be a symlink: %s" % out
+        )
+    tmp = out + ".tmp"
+    fd = _traj_open_export_tmp(tmp)
+    try:
+        with os.fdopen(fd, "w") as f:
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+        os.replace(tmp, out)
+    except Exception:
+        try:
+            if os.path.lexists(tmp) and not os.path.islink(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def cmd_trajectories(a, board):
     """Read, export or backfill the trajectory log."""
     sub = getattr(a, "traj_cmd", "list") or "list"
@@ -11151,11 +11377,8 @@ def cmd_trajectories(a, board):
         out = getattr(a, "out", "") or ""
         if not out:
             sys.exit("export needs --out <file.jsonl>")
-        tmp = out + ".tmp"
-        with open(tmp, "w") as f:
-            for e in sel:
-                f.write(json.dumps(e) + "\n")
-        os.replace(tmp, out)
+        _refuse_traj_export_inside_board(out, board)
+        _traj_write_export_file(out, sel)
         print("exported %d event(s) of %d to %s" % (len(sel), len(events), out))
         return
     limit = int(getattr(a, "limit", 0) or 0)
@@ -11539,8 +11762,14 @@ Then the loop, until `atm next` says nothing is ready:
     atm msg "..." --to <agent> --re <id>             # questions, blockers
     git add -A && git commit -m "..."                    # commit as you go
     atm review <id> --notes "paths, tests, decisions" # reviewable SHA; refuses on main / dirty
-    # human review is the gate; then:
     atm next
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
 
 Plan dependent work with `atm plan` so JSON `deps` become real `--after`
 edges (`atm graph` to inspect). Unattended persist ends at that reviewable
@@ -12224,7 +12453,9 @@ def cmd_connect(a, board):
     print("for the objective and tasks. Turn tasks into a graph with `atm plan`")
     print("(JSON keys + deps), then `atm graph` / `atm map`. Follow up with")
     print("`atm update` / `here`, reopen silent >90m claims, `atm drive`.")
-    print("Unattended persist ends at a reviewable SHA; human `atm review` is the gate.")
+    print("Unattended persist ends at a reviewable SHA. A DIFFERENT seat must "
+          "then record `atm accept <id> --sha <full 40-char review head>`; "
+          "no seat accepts its own work.")
     print("")
     print(CONNECT.format(root=os.path.dirname(board), every=UPDATE_EVERY_MIN))
     _apply_connect_roles(board, a)
@@ -13035,14 +13266,24 @@ Ordinary messages and ACKs are notification-only and must not extend the run.
 If there is no standing objective with a measurable --exit criterion, ask for one
 (`atm objective "<what done looks like>" --exit "<observable end>"`) and do not invent it.
 Transition the objective with `--done`/`--achieved`, `--blocked`, or `--replaced` when that is the outcome.
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
+
 Your three jobs, every wake-up:
 1. UNBLOCK: `atm inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
    grant context (`atm brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
    (`atm create ... --blocks <id>`, `atm dep`), reassign (`atm assign <id> --owner <who>`), or
    decide and say so. Never leave a stuck agent without a reply.
 2. REVIEW + MERGE: `atm master` shows the REVIEW QUEUE. For each entry read the diff against main
-   (`git diff main...<branch>`), check tests ran, then `atm merge <branch>` (runs the suite, fast-forwards
-   main, closes the ticket). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
+   (`git diff main...<branch>`), check tests ran and obtain a DIFFERENT seat's structured
+   accept at the exact current review head before `atm merge <branch>` (runs the suite and
+   integrates the accepted head). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
    and `atm reopen <id>`. Push main with `git push origin main` after merges.
 3. COORDINATE: `atm dash --once` and `atm util` -- reopen tickets whose owner is silent > 90 min
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
@@ -13061,14 +13302,24 @@ Ordinary messages and ACKs are notification-only and must not extend the run.
 Read the current standing objective as context only. Do not ask for, set, replace, or invent an objective;
 escalate those decisions to the master with `atm msg --to <master>`.
 The master planner sets scope and routes by complexity; you review, unblock and merge.
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
+
 Your three jobs, every wake-up:
 1. UNBLOCK: `atm inbox` -- every message starting with "stuck:" or addressed to you gets an answer within this run:
    grant context (`atm brief <agent> "..."` or `--ticket <id>`), re-scope or split the ticket
    (`atm create ... --blocks <id>`, `atm dep`), reassign (`atm assign <id> --owner <who>`), or
    decide and say so. Never leave a stuck agent without a reply.
 2. REVIEW + MERGE: `atm master` shows the REVIEW QUEUE. For each entry read the diff against main
-   (`git diff main...<branch>`), check tests ran, then `atm merge <branch>` (runs the suite, fast-forwards
-   main, closes the ticket). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
+   (`git diff main...<branch>`), check tests ran and obtain a DIFFERENT seat's structured
+   accept at the exact current review head before `atm merge <branch>` (runs the suite and
+   integrates the accepted head). If it is not mergeable, `atm msg --to <owner> --re <id>` with what to change
    and `atm reopen <id>`. Push main with `git push origin main` after merges.
 3. COORDINATE: `atm dash --once` and `atm util` -- reopen tickets whose owner is silent > 90 min
    (`atm limits` first: AUTH means /login is needed, not a wait), `atm route` new tickets,
@@ -18786,7 +19037,8 @@ def _next_step_hint(board, tickets, done_ids, health_items=None):
     review = [t for t in tickets if t.get("status") == "review"]
     if review:
         return {"kind": "merge", "label": "Review queue",
-                "message": "%d ticket(s) at a reviewable SHA — human review is the gate." % len(review),
+                "message": "%d ticket(s) at a reviewable SHA — a DIFFERENT seat must "
+                           "accept each exact head before it can be merged." % len(review),
                 "cmd": "atm merge"}
     agents = load_agents(board) if os.path.isdir(agents_dir(board)) else []
     workforce = load_workforce(board)
@@ -22458,6 +22710,15 @@ dependency tree with each node's status and owner.
     atm master                             # briefing + health
     atm inbox                              # messages addressed to you
 
+**Accept gate**
+
+`atm review` pins the review head. A DIFFERENT seat must review that exact
+head and record `atm accept <id> --sha <full 40-char review head> --notes "evidence"`.
+Never self-accept, including when acting as master or CoS. Dependents stay shut
+until that accept is recorded and the dependency is complete; a DONE label alone
+is not verification. A moved head voids the accept: submit a new review and obtain
+a new independent accept at the new head before integration or release.
+
 **Rules for every agent**
 
 1. Claim before you work (`atm next`). Never work without a ticket; never
@@ -22467,15 +22728,15 @@ dependency tree with each node's status and owner.
 3. You may create, split, re-wire and assign tickets. Extending the graph is
    expected. Anyone can become master with `atm master take`.
 4. Work on your own git worktree and branch, never on main. Commit as you go.
-   `atm review` and `atm done` refuse from main or with uncommitted files.
+   `atm review` refuses from main or with uncommitted files; run `atm sync` first.
 5. Post `atm update <id> "..."` at least every 45 minutes and at every
    milestone. Longer silence is treated as a timeout and the ticket may be
    reopened for someone else.
 6. When finished, submit -- do not close: `atm review <id> --notes "paths
    touched, tests run, decisions dependents must match"` (branch@sha is added
-   automatically; `--pr N` if you opened one). Another seat then reviews it and
-   records `atm accept <id> --sha <exact sha>`; that accept -- not `atm done` --
-   is what releases the dependents. Claim your next ticket right away.
+   automatically; `--pr N` if you opened one). Follow the accept gate above.
+   The integrator may merge only the independently accepted review head.
+   Claim your next ticket right away.
 7. Tickets can declare `needs` (docker, browser, own-machine, gpu ...). You only
    receive tickets whose needs you registered with `--can`. Expensive agents
    are steered to priority-1 work, cheap agents to routine work.
@@ -22519,8 +22780,8 @@ reference a `key` from the same plan or an existing `T-` id:
 
 Tickets whose dependencies are unfinished stay invisible to `atm next`, and a
 finished dependency stays withheld until a DIFFERENT seat accepts its exact sha
-(`atm accept <id> --sha <sha>`), so nobody -- human or agent -- can release
-their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
+(`atm accept <id> --sha <full 40-char review head>`), so nobody -- human or
+agent -- can release their own work. `atm quickstart --gate` demonstrates that in a throwaway dir.
 
 **Adding work to a graph that already exists.** Any agent can extend the graph
 mid-run -- this is normal, not a last resort:
@@ -23004,6 +23265,8 @@ def main():
     c.add_argument("--in-sprint", action="store_true", help="tag with the active sprint")
     c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
     c.add_argument("--worktree", default="", help="implementation checkout; adds automated cleanup child")
+    c.add_argument("--target-repo", default="",
+                   help="repository the deliverable lives in; default: this checkout's origin")
     c.set_defaults(fn=cmd_create)
 
     c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
@@ -23013,6 +23276,8 @@ def main():
     c.add_argument("--role", default=None)
     c.add_argument("--owner", default=None, help="hard-assign (claims on their behalf)")
     c.add_argument("--needs", default=None)
+    c.add_argument("--target-repo", default=None,
+                   help="repository the deliverable lives in; '-' clears it")
     c.add_argument("--priority", type=int, default=None)
     c.add_argument("--title", default="")
     c.add_argument("--by", default="")

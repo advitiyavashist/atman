@@ -122,7 +122,7 @@ tree.
 | write it | `atm sound T-id --notes "cause=...; change=...; proof=...; deps=none"` |
 | dispatch | `atm dispatch T-id --to atman-api --harness cursor` |
 | status | `atm plan-status` |
-| sync a PR | `atm pr-sync` then master `atm done` |
+| sync a PR | `atm pr-sync`; a DIFFERENT seat records `atm accept <id> --sha <full 40-char sha> --notes "evidence"`, then master `atm done` |
 | retro | `atm retro` (files a capture; does not edit briefs itself) |
 
 CEO sounds, CoS dispatches. CEO does **not** `atm next`.
