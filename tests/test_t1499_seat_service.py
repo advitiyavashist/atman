@@ -303,3 +303,16 @@ def test_render_launchd_has_keepalive():
     assert "service" in body and "run" in body
     unit = ss.render_systemd_unit("/usr/bin/python3", "/tmp/tickets.py")
     assert "Restart=always" in unit
+
+
+def test_live_release_install_ships_seat_service():
+    from pathlib import Path
+    ROOT = Path(__file__).resolve().parents[1]
+    """`install.sh --live-release` copies FILES; spawn imports seat_service (T-1499 final review)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("install_live", ROOT / "scripts" / "install_live.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert "seat_service.py" in mod.FILES
+    for name in mod.FILES:
+        assert (ROOT / name).is_file(), name
