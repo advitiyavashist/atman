@@ -15,6 +15,7 @@
     "status": {"type": "string"},
     "status_label": {"type": "string"},
     "accepted": {"type": "boolean", "description": "Only a structured accept or merge record; never prose, a done flag or an override."},
+    "legacy_accept": {"type": "boolean", "description": "done with a legacy short-sha accept: counted verified, labelled 'done, accepted (legacy short sha)'; not a structured accept and does not release dependents (T-1481)."},
     "released": {"type": "boolean"},
     "owner": {"type": "string"},
     "owner_at_project": {"type": "string"},
