@@ -2191,6 +2191,35 @@ def load_agents(board):
         lambda: _load_dir(agents_dir(board), "") if os.path.isdir(agents_dir(board)) else [])
 
 
+def _agent_listing(board):
+    """(name, rec, problem) for every agents/*.json, for `atm spawn --list` (T-1511).
+
+    A record without an owner (a stray receipt write, a hand edit) is listed
+    under its file name with the problem named, instead of crashing the list.
+    """
+    out = []
+    d = agents_dir(board)
+    for path in sorted(glob.glob(os.path.join(d, "*.json"))):
+        stem = os.path.basename(path)[:-len(".json")]
+        try:
+            with open(path) as f:
+                rec = json.load(f)
+        except (ValueError, IOError):
+            out.append((stem, {}, "unreadable json"))
+            continue
+        if not isinstance(rec, dict):
+            out.append((stem, {}, "not an object"))
+            continue
+        owner = rec.get("owner")
+        if not owner:
+            out.append((stem, rec, "no owner field"))
+        elif owner != stem:
+            out.append((owner, rec, "owner %r in %s.json" % (owner, stem)))
+        else:
+            out.append((owner, rec, ""))
+    return sorted(out, key=lambda x: x[0])
+
+
 def worktree_warning(owner):
     """Text telling an agent on main / the primary tree to move to its own tree."""
     g = git_state()
@@ -11009,6 +11038,10 @@ def _note_wake_delivery(board, seat, label, message_id, poked=False):
     }
 
     def mutate(rec):
+        # T-1511: a receipt for a seat with no record must not create one --
+        # it left agents/<seat>.json without an owner and crashed spawn --list.
+        if not rec.get("owner"):
+            return False
         rec["wake_delivery"] = payload
         mid = payload["message_id"]
         if mid and payload["label"] in _AUTONOMOUS_WAKE_LABELS:
@@ -16352,21 +16385,26 @@ def cmd_spawn(a, board):
         print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
             "agent", "watcher", "harness", "wake", "model", "check", "seen", "worktree"))
         with _shared_watch_table():
-          for r in sorted(load_agents(board), key=lambda r: r["owner"]):
-            pids = _live_watch_pids(r["owner"], board=board)
+          malformed = []
+          for name, r, problem in _agent_listing(board):
+            if problem:
+                malformed.append((name, problem))
+            pids = _live_watch_pids(name, board=board)
             wc = len(pids)
             wlabel = ("pid %d" % pids[0]) if wc == 1 else ("%d pids" % wc if wc else "-")
             if wc > 1:
                 wlabel += " !!"
-            entry = wf.get(r["owner"], {})
+            entry = wf.get(name, {})
             print("%-14s %-9s %-9s %-10s %-8s %-12s %-8s %s" % (
-                r["owner"][:14], wlabel,
-                _display_harness(board, r["owner"])[:9],
-                wake_mode_of(board, r["owner"], workforce=wf)[:10],
+                (name + (" !" if problem else ""))[:14], wlabel,
+                _display_harness(board, name)[:9],
+                wake_mode_of(board, name, workforce=wf)[:10],
                 (entry.get("model") or "-")[:8],
                 _harness_check_label(r.get("harness_check")),
                 (fmt_hours(hours_since(r["seen"])) + " ago") if r.get("seen") else "never",
                 (r.get("worktree") or "").replace(os.path.expanduser("~"), "~")))
+        for name, problem in malformed:
+            print("malformed agent record %s: %s" % (name, problem))
         return
     if not a.name:
         sys.exit("spawn needs a name (or --list)")
