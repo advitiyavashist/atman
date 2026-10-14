@@ -38,6 +38,7 @@
           "deps": {"type": "array", "items": {"type": "string"}},
           "depth": {"type": "integer"},
           "unverified": {"type": "boolean", "description": "done without a structured accept."},
+          "legacy_accept": {"type": "boolean", "description": "done with a legacy short-sha accept: counted verified, label 'done, accepted (legacy short sha)', does not release dependents (T-1481)."},
           "accepted": {"type": "boolean", "description": "true only for done with a structured accept or merge record bound to the review head."},
           "released": {"type": "boolean", "description": "dependents may start (accept, merge, or a recorded release override)."},
           "blockers": {"type": "array", "items": {"$ref": "common.json#/$defs/blocker"}},

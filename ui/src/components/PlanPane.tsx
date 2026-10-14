@@ -46,6 +46,11 @@ function Objective({ plan }: { plan: Plan }) {
  * puts under FINISHING / BLOCKED / NEXT STEP. Required at 390px so /app/ is not
  * only a lead picker.
  */
+/** `@seat` when someone holds or is reserved for it; "none yet" instead of "@?" (T-1481). */
+function summaryOwner(who: string | undefined): string {
+  return who ? `@${who}` : "none yet";
+}
+
 function PlanSummary({ plan }: { plan: Plan }) {
   const s = (plan.summary || {}) as PlanSummaryShape;
   const finishing = Array.isArray(s.finishing) ? s.finishing : [];
@@ -61,7 +66,7 @@ function PlanSummary({ plan }: { plan: Plan }) {
             {finishing.map((n) => (
               <li key={n.id}>
                 <b>{n.id}</b> {n.title || <Missing what="untitled" />}
-                <span className="muted"> · @{n.owner || n.who || "?"}</span>
+                <span className="muted"> · {summaryOwner(n.owner || n.who)}</span>
               </li>
             ))}
           </ul>
@@ -89,7 +94,7 @@ function PlanSummary({ plan }: { plan: Plan }) {
         {next ? (
           <p>
             <b>{next.id}</b> {next.title || <Missing what="untitled" />}
-            <span className="muted"> · @{next.owner || next.who || "?"}</span>
+            <span className="muted"> · {summaryOwner(next.owner || next.who)}</span>
           </p>
         ) : (
           <span className="muted">—</span>

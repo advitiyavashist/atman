@@ -59,7 +59,8 @@
             "required": ["id", "title", "phase", "status", "deps", "unverified", "blockers", "running"],
             "properties": {
               "blockers": {"type": "array", "items": {"$ref": "common.json#/$defs/blocker"}},
-              "unverified": {"type": "boolean"}
+              "unverified": {"type": "boolean"},
+              "legacy_accept": {"type": "boolean", "description": "done with a legacy short-sha accept: counted verified, label 'done, accepted (legacy short sha)', does not release dependents (T-1481)."}
             }
           }
         }

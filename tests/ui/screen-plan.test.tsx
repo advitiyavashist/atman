@@ -145,6 +145,23 @@ describe("the execution plan", () => {
     expect(screen.getByTestId("plan-next-owner")).toHaveTextContent("@rev");
   });
 
+  it("next owner reads 'none yet' when nobody holds or is reserved for it (T-1481)", async () => {
+    const plan: Partial<Plan> = {
+      ...PLAN,
+      summary: {
+        ...(PLAN.summary as object),
+        next: { id: "T-4", title: "Waits on an open dep", who: "", owner: "", who_kind: "" },
+      },
+    };
+    const { api } = fakeApi({ plan });
+    render(<App api={api} />);
+    expect(await screen.findByTestId("plan-summary")).toBeInTheDocument();
+    const next = screen.getByTestId("plan-next-owner");
+    expect(next).toHaveTextContent("T-4");
+    expect(next).toHaveTextContent("none yet");
+    expect(next).not.toHaveTextContent("@?");
+  });
+
   it("sidebar says working when the board has claimed work, not 0 open (T-1459)", async () => {
     const { api } = fakeApi({
       plan: PLAN,

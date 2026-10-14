@@ -292,6 +292,24 @@ def review_of(t, msgs_re=None):
             "verified": _review_verified(t, latest)}
 
 
+LEGACY_ACCEPT_LABEL = "done, accepted (legacy short sha)"
+
+
+def legacy_accept(t, review=None):
+    """Done, counted verified by ``review_of``, yet not bound to ``review_head``.
+
+    A short-SHA accept event (for example ``done --force`` then ``accept
+    --sha``) still counts as verified, so the plan's ``done_unverified`` count
+    leaves it out (T-1481). Its label must agree: "done, accepted (legacy
+    short sha)", never "done, not accepted". It is still not
+    ``structured_accept``, so it does not release dependents.
+    """
+    if t.get("status") != "done" or structured_accept(t) or structured_merge(t):
+        return False
+    review = review if review is not None else review_of(t)
+    return bool(review.get("verified"))
+
+
 def verdict_of(t, msgs_re=None):
     """Backward-compatible string: the review label."""
     return review_of(t, msgs_re)["label"]

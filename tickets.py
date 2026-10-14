@@ -20969,8 +20969,11 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
     accepted = bool(status == "done" and (wv.structured_accept(t) or wv.structured_merge(t)))
     released = bool(wv.dep_released(t))
     verified = bool(review.get("verified"))
+    legacy = bool(wv.legacy_accept(t, review))
     if status == "done" and accepted:
         status_label = "done, accepted"
+    elif legacy:
+        status_label = wv.LEGACY_ACCEPT_LABEL
     elif status == "done" and released:
         status_label = "done, released by override (not accepted)"
     elif status == "done":
@@ -21037,6 +21040,7 @@ def ui_ticket(board, tid, operator, project, include_archives=False):
         "id": tid, "project": project, "title": t.get("title") or "",
         "status": status, "status_label": status_label,
         "accepted": accepted,
+        "legacy_accept": legacy,
         "released": released,
         "owner": (t.get("owner") or "").strip(),
         "owner_at_project": ("%s@%s" % (t.get("owner"), project)) if t.get("owner") else "",
@@ -21231,18 +21235,25 @@ def _ui_snapshot_ro(board, seat=""):
 
 
 def _ui_node_accept_state(node, by_id):
-    """(accepted, released, status_label) for one plan node. Records only."""
+    """(accepted, released, legacy_accept, status_label) for one plan node. Records only.
+
+    ``legacy_accept`` agrees with the node's ``unverified`` flag and the
+    ``done_unverified`` count: a short-sha accept counted as verified is not
+    labelled "done, not accepted" (T-1481).
+    """
     wv = _work_view()
     t = by_id.get(node.get("id")) or {}
     if (t.get("status") or node.get("status")) != "done":
-        return False, False, LABEL.get(node.get("status") or "", node.get("status") or "")
+        return False, False, False, LABEL.get(node.get("status") or "", node.get("status") or "")
     accepted = bool(wv.structured_accept(t) or wv.structured_merge(t))
     released = bool(wv.dep_released(t))
     if accepted:
-        return True, True, "done, accepted"
+        return True, True, False, "done, accepted"
+    if wv.legacy_accept(t, node.get("review") or None):
+        return False, released, True, wv.LEGACY_ACCEPT_LABEL
     if released:
-        return False, True, "done, released by override (not accepted)"
-    return False, False, "done, not accepted"
+        return False, True, False, "done, released by override (not accepted)"
+    return False, False, False, "done, not accepted"
 
 
 def ui_plan(board, slug, snap=None):
@@ -21258,8 +21269,9 @@ def ui_plan(board, slug, snap=None):
     nodes = []
     for n in work.get("nodes") or []:
         n = dict(n)
-        accepted, released, label = _ui_node_accept_state(n, by_id)
+        accepted, released, legacy, label = _ui_node_accept_state(n, by_id)
         n["accepted"], n["released"], n["status_label"] = accepted, released, label
+        n["legacy_accept"] = legacy
         n.setdefault("blockers", [])
         n.setdefault("running", None)
         nodes.append(n)
