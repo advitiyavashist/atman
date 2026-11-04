@@ -2422,6 +2422,27 @@ def _review_verdict():
         return m
 
 
+def _seat_authority():
+    _ensure_src_path()
+    from ticket_board import seat_authority as m
+    return m
+
+
+def _seat_tree_chain(board):
+    """This board's seat watchers above the calling process, nearest first (T-022)."""
+    return _seat_authority().board_chain(
+        board, agent_of=_watch_cmd_agent, claimed=_watch_pid_claimed_on_board)
+
+
+def _authority_actor(board, verb):
+    """whoami() for an authority verb, or exit when the live seat tree says otherwise (T-022)."""
+    actor = whoami()
+    ok, how, reason = _seat_authority().decide(actor, _seat_tree_chain(board), verb)
+    if not ok:
+        sys.exit(reason)
+    return actor, how
+
+
 def _seat_brief():
     """T-1078 seat brief: the gate, the ticket and the refusals, composed."""
     try:
@@ -4771,11 +4792,13 @@ def cmd_review(a, board):
 
 def cmd_accept(a, board):
     """Record a structured accept bound to the submitted review head (T-944)."""
+    actor, authority = _authority_actor(board, "accept")
     t = load(board, a.id)
     ev, err = _review_verdict().apply(
-        t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
+        t, actor, a.sha, "accept", notes=a.notes, require_full=True)
     if err:
         sys.exit(err)
+    ev["authority"] = authority
     save(board, t)
     print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
     if t.get("status") == "done":
@@ -4791,12 +4814,13 @@ def cmd_reject(a, board):
     CLI used to leave status=review, so atm mine stayed empty and the author
     idled until a coordinator ran reopen+assign. Reject now matches the API.
     """
+    reviewer, authority = _authority_actor(board, "reject")
     t = load(board, a.id)
-    reviewer = whoami()
     ev, err = _review_verdict().apply(
         t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
     if err:
         sys.exit(err)
+    ev["authority"] = authority
     author = _review_verdict().return_to_author_for_revision(
         t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
         kind="reject")
@@ -7430,6 +7454,7 @@ def _ensure(board, kind, ref):
 
 def cmd_assign(a, board):
     """Modify an existing ticket: epic, sprint, role, owner, priority, title."""
+    _authority_actor(board, "assign")
     t = load(board, a.id)
     changed = []
     if a.epic is not None:
@@ -9981,13 +10006,24 @@ def _message_provenance(board, sender, explicit=None):
         pass
     unverified = via in WEAK_SENDER_VIA
     leadership_flag = ""
+    # T-022: TICKET_SEAT reads as strong, but a supervised seat can set it to
+    # any name. Its watcher ancestry cannot be set, so a post whose sender is
+    # not the seat whose tree it runs in is unverified whatever the env says.
+    if via not in ("explicit",) and (os.environ.get("TICKET_SEAT")
+                                     or os.environ.get("TICKET_AGENT")):
+        real = _safe(lambda: _seat_authority().mismatch(sender, _seat_tree_chain(board)), "")
+        if real:
+            unverified = True
+            leadership_flag = "seat-tree:%s" % real
     if sender and sender in _board_leadership_names(board):
         raw_sid = ""
         for var in SESSION_ID_VARS:
             raw_sid = (os.environ.get(var) or "").strip()
             if raw_sid:
                 break
-        if endpoint_session and raw_sid and endpoint_session != raw_sid:
+        if leadership_flag:
+            pass
+        elif endpoint_session and raw_sid and endpoint_session != raw_sid:
             leadership_flag = "session-mismatch"
         elif not endpoint_session and via in WEAK_SENDER_VIA:
             leadership_flag = "no-registered-endpoint"

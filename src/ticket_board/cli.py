@@ -48,6 +48,11 @@ try:
 except ImportError:
     import review_verdict as _rv
 
+try:
+    from . import seat_authority as _seat_authority
+except ImportError:
+    import seat_authority as _seat_authority
+
 
 def _work_view():
     """Package-safe Work view import (relative first, then sibling src)."""
@@ -2601,13 +2606,24 @@ def cmd_review(a, board):
         print("review_head: %s" % head)
 
 
+def _authority_actor(board, verb):
+    """whoami() for an authority verb, or exit when the live seat tree says otherwise (T-022)."""
+    actor = whoami()
+    ok, how, reason = _seat_authority.decide(actor, _seat_authority.board_chain(board), verb)
+    if not ok:
+        sys.exit(reason)
+    return actor, how
+
+
 def cmd_accept(a, board):
     """Record a structured accept bound to the submitted review head (T-944)."""
+    actor, authority = _authority_actor(board, "accept")
     t = load(board, a.id)
     ev, err = _rv.apply(
-        t, whoami(), a.sha, "accept", notes=a.notes, require_full=True)
+        t, actor, a.sha, "accept", notes=a.notes, require_full=True)
     if err:
         sys.exit(err)
+    ev["authority"] = authority
     save(board, t)
     print("%s accepted %s by %s" % (a.id, ev["sha"], ev["by"]))
     if t.get("status") == "done":
@@ -2623,12 +2639,13 @@ def cmd_reject(a, board):
     CLI used to leave status=review, so atm mine stayed empty and the author
     idled until a coordinator ran reopen+assign. Reject now matches the API.
     """
+    reviewer, authority = _authority_actor(board, "reject")
     t = load(board, a.id)
-    reviewer = whoami()
     ev, err = _rv.apply(
         t, reviewer, a.sha, "reject", reason=a.reason, require_full=False)
     if err:
         sys.exit(err)
+    ev["authority"] = authority
     author = _rv.return_to_author_for_revision(
         t, actor=reviewer, reason=ev.get("reason") or a.reason, sha=ev["sha"],
         kind="reject")
@@ -3316,6 +3333,7 @@ def _ensure(board, kind, ref):
 
 def cmd_assign(a, board):
     """Modify an existing ticket: epic, sprint, role, owner, priority, title."""
+    _authority_actor(board, "assign")
     t = load(board, a.id)
     changed = []
     if a.epic is not None:
