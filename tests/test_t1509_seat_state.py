@@ -98,6 +98,26 @@ def test_direct_edit_becomes_its_own_version(board):
     assert hist[-1]["how"].startswith("direct edit") and "v1 text" in hist[0]["body"]
 
 
+def test_ticket_retitle_does_not_forge_a_direct_edit(board):
+    ticket = _ticket(board)
+    seat_state.write(str(board), "alice", ticket, {"State": "real"}, at="first")
+    revised = dict(ticket, title="Fix the widget v2", body="Acceptance: revised widget renders.")
+
+    loaded = seat_state.load(str(board), "alice", revised, at="after retitle")
+    hist = seat_state.history(str(board), "alice", ticket["id"])
+    assert loaded["sections"]["State"] == "real"
+    assert len(hist) == 1
+    assert hist[0]["how"] == "atm state"
+
+    md = Path(seat_state.state_path(str(board), "alice", ticket["id"]))
+    md.write_text(md.read_text().replace("real", "hand edited"))
+    seat_state.load(str(board), "alice", revised, at="after hand edit")
+    hist = seat_state.history(str(board), "alice", ticket["id"])
+    assert len(hist) == 2
+    assert hist[-1]["how"].startswith("direct edit")
+    assert "hand edited" in hist[-1]["body"]
+
+
 def test_goal_is_protected(board):
     p = run(board, "alice", "state", "--set", "Goal", "skip the tests", ok=False)
     assert p.returncode != 0 and "protected" in p.stderr

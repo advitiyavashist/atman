@@ -321,7 +321,8 @@ def write(board, seat, ticket, updates=None, replace_text=None, at=""):
         return hist[-1], False
     rec = {"v": len(hist) + 1, "at": at, "by": seat, "ticket": tid, "how": "atm state",
            "owner_generation": ticket.get("owner_generation") or 0,
-           "sha256": _digest(body), "body": body}
+           "sha256": _digest(body), "body": body,
+           "raw": protected_header(ticket) + "\n\n" + body}
     if current and current.get("inherited_from"):
         rec["inherited_from"] = "%s@v%s" % (current["inherited_from"], current.get("version"))
     _append(board, seat, tid, rec)
