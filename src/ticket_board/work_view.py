@@ -554,7 +554,19 @@ def refuse_unreleased_reason(t, tickets, only_done=False):
     pred = unreleased_dep_id(t, tickets, only_done=only_done)
     if not pred:
         return ""
-    return "%s: %s" % (t.get("id") or "?", unverified_block_reason(pred))
+    predecessor = next((x for x in tickets if x.get("id") == pred), None)
+    status = (predecessor or {}).get("status")
+    if status == "done":
+        reason = unverified_block_reason(pred)
+    elif status == "claimed":
+        reason = "%s is in progress; finish and submit it for review before starting dependent work" % pred
+    elif status == "review":
+        reason = "%s is in review; wait for independent acceptance and completion" % pred
+    elif status == "blocked":
+        reason = "%s is blocked; resolve it before starting dependent work" % pred
+    else:
+        reason = "%s is still open; complete it before starting dependent work" % pred
+    return "%s: %s" % (t.get("id") or "?", reason)
 
 
 def unverified_block_reason(pred_id):
