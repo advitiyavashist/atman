@@ -4149,13 +4149,81 @@ def cmd_map(a, board):
         print("(done tickets hidden; --all shows them)")
 
 
+# T-024: command output above this many bytes is spilled to a file.
+SPILL_BYTES = 8000
+SPILL_KEEP = 20
+
+
+def _spill_limit():
+    try:
+        return max(0, int(os.environ.get("TICKETS_SPILL_BYTES", SPILL_BYTES)))
+    except ValueError:
+        return SPILL_BYTES
+
+
+def spill_text(board, seat, label, text, limit=None):
+    """`text`, or its head and tail plus the path of a file holding all of it (T-024).
+
+    A seat reads command output into its context window; a 20KB inbox costs
+    every later request in that session. Above `limit` bytes the full text
+    goes to agents/<seat>/spill/<utc>-<label>.txt and the seat gets the first
+    and last lines with one line in between that says how much was elided
+    and where it is. Head and tail both: a ticket's title and body lead, and
+    the newest notes and messages trail. 0 disables. Never raises: if the
+    file cannot be written, the full text is returned unchanged.
+    """
+    limit = _spill_limit() if limit is None else limit
+    data = text.encode("utf-8")
+    if not limit or len(data) <= limit:
+        return text
+    lines = text.splitlines()
+    head, tail, used = [], [], 0
+    budget = limit // 2
+    for ln in lines:
+        if used + len(ln) + 1 > budget:
+            break
+        head.append(ln)
+        used += len(ln) + 1
+    used = 0
+    for ln in reversed(lines[len(head):]):
+        if used + len(ln) + 1 > budget:
+            break
+        tail.insert(0, ln)
+        used += len(ln) + 1
+    if not head and lines:
+        # One line longer than the budget (a pasted log in a ticket body):
+        # show its start rather than nothing but the pointer.
+        head = [lines[0][:budget] + " ..."]
+    hidden = len(lines) - len(head) - len(tail)
+    if hidden <= 0 and len("\n".join(head + tail)) >= len(text):
+        return text
+    try:
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", seat or "unknown") or "unknown"
+        d = os.path.join(agents_dir(board), safe, "spill")
+        os.makedirs(d, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        path = os.path.join(d, "%s-%s.txt" % (stamp, re.sub(r"[^A-Za-z0-9_.-]", "_", label)))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text if text.endswith("\n") else text + "\n")
+        for old in sorted(glob.glob(os.path.join(d, "*.txt")))[:-SPILL_KEEP]:
+            _safe(lambda old=old: os.remove(old), None)
+    except OSError:
+        return text
+    hidden = max(hidden, 1)
+    mid = ("... %d of %d lines elided (%d bytes total); full output: %s "
+           "(read it there, or rerun with --full)" % (hidden, len(lines), len(data), path))
+    return "\n".join(head + [mid] + tail)
+
+
 def cmd_show(a, board):
     tickets = load_all(board)
     t = load(board, a.id)
     if a.json:
         print(json.dumps(t, indent=2))
-    else:
+    elif getattr(a, "full", False):
         print(detail(board, t, tickets))
+    else:
+        print(spill_text(board, whoami(), "show-" + t["id"], detail(board, t, tickets)))
 
 
 def _filter_ready(ready, roles):
@@ -11125,22 +11193,23 @@ def cmd_inbox(a, board):
         for m in msgs:
             print(fmt_msg(m))
         return
+    full = getattr(a, "full", False)
     if a.all:
         msgs = load_messages(board, include_archives=True)[-a.limit:]
         if not msgs:
             print("no messages yet (atm msg \"text\" [--to agent] [--re T-001])")
             return
-        for m in msgs:
-            print(fmt_msg(m))
+        out = "\n".join(fmt_msg(m) for m in msgs)
+        print(out if full else spill_text(board, owner, "inbox-all", out))
     else:
         scan = _inbox_scan(board, owner)
         msgs = scan[0]
         if not msgs:
             print("inbox empty for %s (atm inbox --all for history)" % owner)
         else:
-            print("%d unread for %s:" % (len(msgs), owner))
-            for m in msgs:
-                print("  " + fmt_msg(m))
+            out = "\n".join(["%d unread for %s:" % (len(msgs), owner)]
+                            + ["  " + fmt_msg(m) for m in msgs])
+            print(out if full else spill_text(board, owner, "inbox", out))
     if not a.keep:
         # Mark exactly what this read observed. Recomputing here instead
         # would advance the watermark past anything that landed in between.
@@ -23968,6 +24037,8 @@ def main():
                    help="print nothing when this session has no recorded seat "
                         "(for hooks: silence beats another seat's backlog)")
     c.add_argument("--owner", "-o")
+    c.add_argument("--full", action="store_true",
+                   help="print everything even above TICKETS_SPILL_BYTES (default: spill to a file)")
     c.set_defaults(fn=cmd_inbox)
 
     c = sub.add_parser("trajectories", aliases=["traj"],
@@ -24172,6 +24243,8 @@ def main():
     c = sub.add_parser("show", help="show one ticket in full")
     c.add_argument("id")
     c.add_argument("--json", action="store_true")
+    c.add_argument("--full", action="store_true",
+                   help="print everything even above TICKETS_SPILL_BYTES (default: spill to a file)")
     c.set_defaults(fn=cmd_show)
 
     c = sub.add_parser("next", help="atomically claim the next available ticket")
