@@ -264,6 +264,7 @@ def write_ticket_handoff(board, ticket_id, record, actor=None):
         expected = owner_generation(ticket)
         ticket["handoff"] = compact_handoff(record)
         ticket["updated"] = stamp()
+        ticket["rev"] = next_revision(ticket, ticket)
         fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=ticket_id + "-")
         try:
             with os.fdopen(fd, "w") as output:
@@ -373,9 +374,39 @@ def ticket_mutation_lock(board, ticket_id):
     return TicketMutationLock(board, ticket_id)
 
 
+def revision(ticket):
+    try:
+        return int((ticket or {}).get("rev") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def stale_revision_error(current, incoming):
+    """T-020 compare-and-set: refuse a ticket dict loaded before a newer save.
+
+    Every publish stamps `rev`; a writer that loaded rev N may publish only
+    while the board is still at N. Before this, 20 concurrent `atm update`
+    calls on one ticket kept 4 notes and dropped 16 without an error.
+    """
+    have, want = revision(current), revision(incoming)
+    if have and want < have:
+        tid = incoming.get("id") or current.get("id")
+        return ("%s changed since you read it (revision %d, board is at %d): another "
+                "writer saved it first. Reread (`atm show %s`) and retry." % (tid, want, have, tid))
+    return None
+
+
+def next_revision(current, incoming):
+    """The revision a successful publish stamps. Never moves backwards."""
+    return max(revision(current), revision(incoming)) + 1
+
+
 def generation_publish_error(current, incoming, expected_generation=None):
-    """Refuse publishing a write that lost a concurrent generation bump."""
+    """Refuse publishing a write that lost a concurrent generation or revision bump."""
     err = stale_write_error(current, incoming)
+    if err:
+        return err
+    err = stale_revision_error(current, incoming)
     if err:
         return err
     if expected_generation is not None and owner_generation(current) != int(expected_generation):

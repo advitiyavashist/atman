@@ -820,6 +820,15 @@ def _recovery():
             return None
 
 
+
+def _ticket_scope():
+    """T-020 write_scope: declared path prefixes and their overlaps."""
+    try:
+        from . import ticket_scope as m
+    except ImportError:
+        import ticket_scope as m
+    return m
+
 def _lease_harness(board, owner):
     try:
         return (load_workforce(board).get(owner) or {}).get("harness") or ""
@@ -827,7 +836,7 @@ def _lease_harness(board, owner):
         return ""
 
 
-def save(board, t, expected_generation=None):
+def save(board, t, expected_generation=None, followups=True):
     t["updated"] = now()
     path = ticket_path(board, t["id"])
     tc = _recovery()
@@ -854,6 +863,9 @@ def save(board, t, expected_generation=None):
                 err = tc.generation_publish_error(current, t, expected_generation)
                 if err:
                     sys.exit(err)
+        # T-020: compare-and-set revision; the check above refused a stale rev.
+        if tc is not None:
+            t["rev"] = tc.next_revision(current, t)
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(t, f, indent=2)
@@ -881,9 +893,34 @@ def save(board, t, expected_generation=None):
             result = _publish()
     # Run after the parent mutation lock: child recovery takes its own lock.
     # This covers accept, merge records, overrides and done after accept.
+    if followups:
+        _save_followups(board, t)
+    return result
+
+
+def _save_followups(board, t):
     if _work_view().dep_released(t):
         _reopen_unverified_successors(board, t["id"])
-    return result
+
+
+def mutate_ticket(board, tid, change):
+    """T-020: read-modify-write one ticket inside its mutation lock.
+
+    `change(t)` edits the freshly loaded ticket in place, so a concurrent
+    writer can never make this edit stale: no revision conflict, no lost
+    note. Follow-ups that take other locks run after the lock is released.
+    """
+    tc = _recovery()
+    if tc is None:
+        t = load(board, tid)
+        change(t)
+        return save(board, t)
+    with tc.ticket_mutation_lock(board, tid):
+        t = load(board, tid)
+        change(t)
+        save(board, t, followups=False)
+    _save_followups(board, t)
+    return t
 
 
 def load_all(board):
@@ -1002,7 +1039,8 @@ def _alloc(directory, prefix, width, record):
 
 
 def create(board, title, body="", role="", deps=None, priority=2, epic="", sprint="",
-           needs=None, target_repo=""):
+           needs=None, target_repo="", write_scope=None):
+    extra = {"write_scope": list(write_scope)} if write_scope else {}
     return _alloc(board, "T", 3, {
         "title": title,
         "body": body,
@@ -1018,6 +1056,7 @@ def create(board, title, body="", role="", deps=None, priority=2, epic="", sprin
         "updated": now(),
         "notes": [],
         **_target_repo_stamp(target_repo),
+        **extra,
     })
 
 
@@ -1703,6 +1742,10 @@ def detail(board, t, tickets):
         if t["status"] == "claimed" and tm["since_update"] is not None:
             stamp += ", last update %s ago" % fmt_hours(tm["since_update"])
         out.append("Time: " + stamp)
+    scope = _ticket_scope().scope_of(t)
+    if scope:
+        out.append("write_scope: %s" % ", ".join(s or "(whole repo)" for s in scope))
+        out.extend(_ticket_scope().conflict_lines(t, tickets))
     head = _rv.displayed_review_head(t)
     if head:
         out.append("review_head: %s" % head)
@@ -1754,7 +1797,8 @@ def cmd_create(a, board):
     sprint = a.sprint if a.sprint is not None else (cur["id"] if cur and a.in_sprint else "")
     t = create(board, a.title, a.body or "", a.role or "", deps, a.priority,
                a.epic or "", sprint, _ids(a.needs),
-               getattr(a, "target_repo", "") or "")
+               getattr(a, "target_repo", "") or "",
+               write_scope=_scope_args(getattr(a, "scope", None)))
     pending = {}
     for other in blocks:
         o = load(board, other)
@@ -1813,12 +1857,14 @@ def cmd_plan(a, board):
         for it in items:
             if it.get(k):
                 _ensure(board, k, it[k])
+    scopes = [_scope_args(it.get("write_scope")) for it in items]  # refuse before creating any
     keymap = {}
     made = []
-    for it in items:
+    for it, scope in zip(items, scopes):
         t = create(board, it["title"], it.get("body", ""), it.get("role", defaults.get("role", "")),
                    [], it.get("priority", 2), it.get("epic", defaults.get("epic", "")),
-                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [])
+                   it.get("sprint", defaults.get("sprint", "")), it.get("needs") or [],
+                   write_scope=scope)
         if it.get("key"):
             keymap[it["key"]] = t["id"]
         made.append(t)
@@ -2145,10 +2191,9 @@ def _start_successors(board, finished_id):
         if sha:
             text += " accepted %s" % sha
         text += " -- start (success trigger)"
-        child.setdefault("notes", []).append({
-            "by": whoami(), "at": now(), "text": text,
-        })
-        save(board, child)
+        note = {"by": whoami(), "at": now(), "text": text}
+        child = mutate_ticket(board, child["id"],
+                              lambda c, note=note: c.setdefault("notes", []).append(note))
         if who:
             post_message(board, whoami(), text, to=who, re=child["id"], task=True)
             started.append("%s -> %s" % (child["id"], who))
@@ -2523,6 +2568,21 @@ def cmd_claim(a, board):
         print(warn)
 
 
+
+def _warn_outside_scope(t, run_git, trunk):
+    """T-020: name committed paths the ticket's write_scope does not cover."""
+    ts = _ticket_scope()
+    scope = ts.scope_of(t)
+    if not scope:
+        return
+    changed = (run_git("diff", "--name-only", trunk + "...HEAD") or "").splitlines()
+    stray = ts.outside(scope, changed)
+    if stray:
+        shown = ", ".join(stray[:8]) + (" (+%d more)" % (len(stray) - 8) if len(stray) > 8 else "")
+        print("warning: %d changed path(s) outside %s write_scope [%s]: %s"
+              " -- widen it with `atm scope %s --add PATH` if that was intended"
+              % (len(stray), t["id"], ", ".join(s or "(whole repo)" for s in scope), shown, t["id"]))
+
 def cmd_review(a, board):
     """Agent finished: submit for the master to review + merge. Records branch@sha."""
     t = load(board, a.id)
@@ -2541,6 +2601,11 @@ def cmd_review(a, board):
         if git("merge-base", "--is-ancestor", trunk, "HEAD") is None:
             sys.exit("RULE: your branch is behind %s. Run `atm sync` (merges %s in, so conflicts "
                      "are yours to fix now, not the master's later), then submit again." % (trunk, trunk))
+    if g:
+        try:
+            _warn_outside_scope(t, git, _trunk())
+        except Exception:
+            pass
     if (a.pr or "").strip():
         if not g:
             sys.exit("review --pr: not in a git working tree; cannot verify a submitted SHA")
@@ -3287,11 +3352,54 @@ def cmd_block(a, board):
     print("%s blocked: %s" % (a.id, a.reason))
 
 
+def _scope_args(values):
+    try:
+        return _ticket_scope().normalize_all(values or [])
+    except _ticket_scope().ScopeError as exc:
+        sys.exit(str(exc))
+
+
+def cmd_scope(a, board):
+    """`atm scope [ID]`: show or edit a ticket's write_scope (T-020)."""
+    ts = _ticket_scope()
+    tickets = load_all(board)
+    if a.check or not a.id:
+        pairs = ts.all_overlaps(tickets)
+        if not pairs:
+            print("no overlapping write_scope among in-progress tickets")
+            return
+        for t, other, shared in pairs:
+            print("%s (%s) ~ %s (%s): %s" % (
+                t["id"], t.get("owner") or "nobody", other["id"], other.get("owner") or "nobody",
+                ", ".join("%s ~ %s" % (m or "(whole repo)", o or "(whole repo)") for m, o in shared)))
+        if a.check:
+            sys.exit(1)
+        return
+    add, drop = _scope_args(a.add), _scope_args(a.drop)
+    if add or drop or a.clear:
+        def change(t):
+            scope = [] if a.clear else ts.scope_of(t)
+            scope = [s for s in scope if s not in drop] + [s for s in add if s not in scope]
+            if scope:
+                t["write_scope"] = scope
+            else:
+                t.pop("write_scope", None)
+            t["notes"].append({"by": whoami(None), "at": now(),
+                               "text": "write_scope -> %s" % (", ".join(scope) or "(none)")})
+        t = mutate_ticket(board, a.id, change)
+        tickets = load_all(board)
+    else:
+        t = load(board, a.id)
+    scope = ts.scope_of(t)
+    print("%s write_scope: %s" % (t["id"], ", ".join(s or "(whole repo)" for s in scope) or "(none)"))
+    for warning in ts.conflict_lines(t, tickets):
+        print(warning)
+
+
 def cmd_note(a, board):
-    t = load(board, a.id)
     who = whoami(a.by)
-    t["notes"].append({"by": who, "at": now(), "text": a.text})
-    save(board, t)
+    note = {"by": who, "at": now(), "text": a.text}
+    t = mutate_ticket(board, a.id, lambda t: t["notes"].append(note))
     # notes_len only -- the note body is the agent's own prose and never enters
     # the trajectory log.
     traj_event(board, "update", agent=who or whoami(), ticket=t,
@@ -6112,6 +6220,8 @@ def main():
     c.add_argument("--needs", default="", help="capabilities required: docker,browser,own-machine")
     c.add_argument("--target-repo", default="",
                    help="repository the deliverable lives in; default: this checkout's origin")
+    c.add_argument("--scope", action="append", default=[], metavar="PATH",
+                   help="write_scope: a path prefix this ticket will touch (repeatable)")
     c.set_defaults(fn=cmd_create)
 
     c = sub.add_parser("assign", help="modify a ticket: epic, sprint, role, owner, needs, priority")
@@ -6489,6 +6599,14 @@ def main():
 
     c = sub.add_parser("context", help="print the shared briefing file")
     c.set_defaults(fn=cmd_context)
+
+    c = sub.add_parser("scope", help="show or edit a ticket's write_scope (T-020)")
+    c.add_argument("id", nargs="?", help="ticket id (omit to list overlaps among in-progress tickets)")
+    c.add_argument("--add", action="append", metavar="PATH", help="declare a path prefix (repeatable)")
+    c.add_argument("--drop", action="append", metavar="PATH", help="remove a declared prefix")
+    c.add_argument("--clear", action="store_true", help="remove every declared prefix")
+    c.add_argument("--check", action="store_true", help="exit 1 when in-progress tickets overlap")
+    c.set_defaults(fn=cmd_scope)
 
     c = sub.add_parser("mine", help="list tickets claimed by this agent")
     c.add_argument("--owner", "-o")
