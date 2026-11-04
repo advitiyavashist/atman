@@ -156,6 +156,11 @@ def test_reassigned_seat_inherits_previous_owners_state(board):
 def test_markdown_subheading_survives_write_and_handoff(board):
     text = "Working on parser\n## Test results\n3 passed"
     run(board, "alice", "state", "--set", "State", text)
+    own_prompt = run(board, "alice", "prompt").stdout
+    assert "## Test results" in own_prompt and "3 passed" in own_prompt
+    own_state = run(board, "alice", "state").stdout
+    assert "## Test results" in own_state and "3 passed" in own_state
+    assert len(seat_state.history(str(board), "alice", "T-001")) == 1
     run(board, "alice", "assign", "T-001", "--owner", "bob")
     prompt = run(board, "bob", "prompt").stdout
     assert "## Test results" in prompt and "3 passed" in prompt

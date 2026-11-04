@@ -180,30 +180,44 @@ def _write_md(board, seat, ticket, body):
     os.replace(tmp, path)
 
 
-def _file_body(board, seat, ticket_id):
+def _file_body(board, seat, ticket):
     """The normalized editable body and raw file, or None when absent."""
+    ticket_id = ticket.get("id")
     try:
         with open(state_path(board, seat, ticket_id), encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return None
+    header = protected_header(ticket) + "\n\n"
+    if text.startswith(header):
+        editable = text[len(header):]
+    else:
+        # A hand edit may change the protected Goal. Find the first rendered
+        # editable heading while retaining the full raw file for provenance.
+        marker = "\n\n## State\n"
+        _, found, after = text.partition(marker)
+        editable = "## State\n" + after if found else text
     try:
-        return render_body(parse(text)), text
+        return render_body(parse(editable)), text
     except StateError:
         # A hand edit that added a Goal or an unknown section: keep what the
         # known sections say, drop the rest. The raw text stays in the next
         # version's `raw` field so nothing is lost.
         keep = {}
         current = None
-        for line in text.splitlines():
+        for line in editable.splitlines():
             m = _HEADING_RE.match(line)
             if m:
                 try:
-                    current = section_name(m.group(1))
+                    name = section_name(m.group(1))
                 except StateError:
-                    current = None
-                if current:
-                    keep[current] = []
+                    if current and m.group(1).strip().casefold() != PROTECTED.casefold():
+                        keep[current].append(line)
+                    else:
+                        current = None
+                    continue
+                current = name
+                keep[current] = []
                 continue
             if current:
                 keep[current].append(line)
@@ -214,7 +228,7 @@ def _reconcile(board, seat, ticket, at):
     """Record an out-of-band edit of the .md file as its own version."""
     tid = ticket.get("id")
     hist = history(board, seat, tid)
-    on_disk = _file_body(board, seat, tid)
+    on_disk = _file_body(board, seat, ticket)
     if on_disk is None:
         return hist
     body, raw = on_disk
