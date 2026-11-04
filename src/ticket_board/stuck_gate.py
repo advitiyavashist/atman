@@ -146,7 +146,7 @@ def record_round(stuck, by, obstacle, evidence, now_dt, environ=None):
     rounds.append({"at": _iso(now_dt), "by": by, "obstacle": obstacle,
                    "evidence": evidence[:2000]})
     cur["rounds"] = rounds
-    cur["obstacle"] = obstacle
+    cur["obstacle"] = rounds[0]["obstacle"]  # the first round names it
     followup = is_open(cur)
     escalate = False
     if not followup:
