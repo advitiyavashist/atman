@@ -62,6 +62,13 @@ def _ticket(board, tid):
     return json.loads((board / (tid + ".json")).read_text())
 
 
+def _accept(board, tid):
+    head = _ticket(board, tid)["review_head"]
+    r = run(board, "accept", tid, "--sha", head, "--notes", "verified",
+            agent="independent-reviewer")
+    assert r.returncode == 0, r.stderr + r.stdout
+
+
 def _write_ticket(board, tid, rec):
     (board / (tid + ".json")).write_text(json.dumps(rec))
 
@@ -93,6 +100,7 @@ def test_cross_repo_pin_is_not_closed_and_same_repo_pin_still_closes(board):
     a_tip = _git(repo, "rev-parse", "HEAD")
     r = run(board, "review", tid_a, "--notes", "did the thing", agent="alice", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid_a)
     _git(repo, "checkout", trunk)
 
     # Ticket B: a DIFFERENT deliverable that happens to record the exact same
@@ -107,6 +115,7 @@ def test_cross_repo_pin_is_not_closed_and_same_repo_pin_still_closes(board):
     _git(other_repo, "checkout", "-b", "bob/other-repo-work")
     r = run(board, "review", tid_b, "--notes", "unrelated work, unrelated repo", agent="bob", cwd=other_repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid_b)
     rec_b = _ticket(board, tid_b)
     assert rec_b["repo"] and rec_b["repo"] != _ticket(board, tid_a)["repo"], (
         "precondition: the two tickets' recorded repos must actually differ"
@@ -142,6 +151,7 @@ def test_legacy_pin_with_no_recorded_repo_is_not_eligible_for_auto_close(board):
     _git(repo, "commit", "-m", "legacy work")
     r = run(board, "review", tid, "--notes", "legacy work", agent="carol", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid)
     _git(repo, "checkout", trunk)
 
     rec = _ticket(board, tid)
@@ -174,6 +184,7 @@ def test_in_progress_ticket_sharing_a_branch_name_is_untouched_by_merge(board):
     _git(repo, "commit", "-m", "reviewed work")
     r = run(board, "review", tid_reviewed, "--notes", "reviewed work", agent="dave", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid_reviewed)
     _git(repo, "checkout", trunk)
 
     # A second, unrelated ticket that merely CLAIMS the identical branch name
@@ -255,6 +266,7 @@ def test_review_from_repo_a_for_an_artifact_in_repo_b(board):
     r = run(board, "review", tid, "--notes", "work is in the other repo",
             "--artifact", str(repo_b), agent="alice", cwd=repo_a)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid)
 
     rec = _ticket(board, tid)
     assert rec["repo"] == "https://example.invalid/artifact_repo.git", (
@@ -286,6 +298,7 @@ def test_review_from_repo_a_for_an_artifact_in_repo_b(board):
     run(board, "claim", tid_a, agent="bob")
     r = run(board, "review", tid_a, "--notes", "unrelated", agent="bob", cwd=repo_a)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid_a)
     _git(repo_a, "checkout", "-q", trunk_a)
 
     r = run(board, "merge", "someone/unrelated-a-work", "--no-test", agent="ceo", cwd=repo_a)
@@ -679,6 +692,7 @@ def test_ticket_does_not_close_on_a_coincidentally_matching_sha_from_another_bra
     real_sha = _git(repo, "rev-parse", "HEAD")
     r = run(board, "review", tid_real, "--notes", "did the real thing", agent="alice", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid_real)
     _git(repo, "checkout", trunk)
 
     # The impostor: a DIFFERENT ticket, never touching `alice/real-work`, whose
@@ -690,8 +704,10 @@ def test_ticket_does_not_close_on_a_coincidentally_matching_sha_from_another_bra
     rec["status"] = "review"
     rec["branch"] = "bob/still-open-elsewhere"
     rec["commit"] = "bob/still-open-elsewhere@" + real_sha
+    rec["review_head"] = real_sha
     rec["repo"] = _ticket(board, tid_real)["repo"]  # same repo -- not a cross-repo case
     _write_ticket(board, tid_impostor, rec)
+    _accept(board, tid_impostor)
 
     r = run(board, "merge", "alice/real-work", "--no-test", agent="ceo", cwd=repo)
     assert r.returncode == 0, r.stderr
@@ -731,6 +747,7 @@ def test_trunk_snapshot_on_bare_agent_branch_does_not_close_when_sibling_merges(
     _git(repo, "checkout", "-b", agent_branch)
     r = run(board, "review", tid_snapshot, "--notes", "trunk snapshot only", agent="sonnet-sdk", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid_snapshot)
 
     # Ticket B: real work on the same bare agent branch, on top of the snapshot.
     tid_real = _create(board, "Real work on bare agent branch", role="backend")
@@ -740,6 +757,7 @@ def test_trunk_snapshot_on_bare_agent_branch_does_not_close_when_sibling_merges(
     _git(repo, "commit", "-m", "real work")
     r = run(board, "review", tid_real, "--notes", "real work", agent="sonnet-sdk", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid_real)
     _git(repo, "checkout", trunk)
 
     rec_snapshot = _ticket(board, tid_snapshot)
@@ -757,3 +775,58 @@ def test_trunk_snapshot_on_bare_agent_branch_does_not_close_when_sibling_merges(
     assert "contributed nothing" in r.stdout, (
         "the refusal must be reported, not silent: %s" % r.stdout
     )
+
+
+def test_merge_closes_only_current_accept_when_older_pins_ride_along(board):
+    """An accepted tip contains earlier rejected and unreviewed commits."""
+    repo = board.parent
+    trunk = _git(repo, "symbolic-ref", "--short", "HEAD")
+    _ignore_board(repo)
+    run(board, "master", "take", "--owner", "ceo")
+    _git(repo, "checkout", "-b", "shared/verdicts")
+
+    rejected = _create(board, "Rejected earlier work", role="backend")
+    run(board, "claim", rejected, agent="alice")
+    (repo / "rejected.txt").write_text("requires changes")
+    _git(repo, "add", "rejected.txt")
+    _git(repo, "commit", "-m", "rejected work")
+    r = run(board, "review", rejected, "--notes", "submitted", agent="alice", cwd=repo)
+    assert r.returncode == 0, r.stderr + r.stdout
+    _accept(board, rejected)
+    rejected_head = _ticket(board, rejected)["review_head"]
+    r = run(board, "reject", rejected, "--sha", rejected_head,
+            "--reason", "needs revision", agent="independent-reviewer")
+    assert r.returncode == 0, r.stderr + r.stdout
+    # Current reject returns the ticket to claimed. Older boards kept it in
+    # review, which is the incident's shape and the merge queue's input.
+    rec = _ticket(board, rejected)
+    rec["status"] = "review"
+    _write_ticket(board, rejected, rec)
+
+    unreviewed = _create(board, "No verdict yet", role="backend")
+    run(board, "claim", unreviewed, agent="bob")
+    (repo / "unreviewed.txt").write_text("pending")
+    _git(repo, "add", "unreviewed.txt")
+    _git(repo, "commit", "-m", "unreviewed work")
+    r = run(board, "review", unreviewed, "--notes", "pending verdict",
+            agent="bob", cwd=repo)
+    assert r.returncode == 0, r.stderr + r.stdout
+
+    accepted = _create(board, "Accepted later work", role="backend")
+    run(board, "claim", accepted, agent="carol")
+    (repo / "accepted.txt").write_text("approved")
+    _git(repo, "add", "accepted.txt")
+    _git(repo, "commit", "-m", "accepted work")
+    r = run(board, "review", accepted, "--notes", "ready", agent="carol", cwd=repo)
+    assert r.returncode == 0, r.stderr + r.stdout
+    _accept(board, accepted)
+    _git(repo, "checkout", trunk)
+
+    r = run(board, "merge", "shared/verdicts", "--no-test", agent="ceo", cwd=repo)
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert _status(board, accepted) == "done", r.stdout
+    assert _status(board, rejected) == "review", r.stdout
+    assert _status(board, unreviewed) == "review", r.stdout
+    assert "no current ACCEPT" in r.stdout
+    assert "skipped %s" % rejected in r.stdout
+    assert "skipped %s" % unreviewed in r.stdout

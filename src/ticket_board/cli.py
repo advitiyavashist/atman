@@ -2810,6 +2810,7 @@ def cmd_merge(a, board):
       - only the designated integrator (master.json) may merge
       - process lock serializes concurrent integrators
       - merge recorded review commits, not moving branch tips
+      - integrate and close only pins with a current ACCEPT at the review head
       - close only tickets whose submitted SHA is ancestor of resulting main
       - refuse blanket -X ours unless --discard-code
       - failed checks leave review tickets untouched
@@ -2858,6 +2859,9 @@ def cmd_merge(a, board):
             branch_tickets = [t for t in queue if t.get("branch") == b]
             pins = []
             for t in branch_tickets:
+                if not _work_view().structured_accept(t):
+                    skipped.append((t["id"], "no current ACCEPT at the submitted review head; refusing to merge this pin"))
+                    continue
                 pin = parse_review_sha(t.get("commit"))
                 if not pin:
                     skipped.append((t["id"], "review ticket on %s has no recorded commit sha" % b))
@@ -2987,6 +2991,9 @@ def cmd_merge(a, board):
 
         closed = []
         for t2 in queue:
+            if not _work_view().structured_accept(t2):
+                skipped.append((t2["id"], "no current ACCEPT at the submitted review head; left IN REVIEW even if its commit reached trunk"))
+                continue
             pin = parse_review_sha(t2.get("commit"))
             if not pin:
                 continue

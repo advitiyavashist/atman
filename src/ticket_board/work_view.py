@@ -362,18 +362,18 @@ def _current_release_head_matches(t, sha):
 
 
 def structured_accept(t):
-    """True when review_events has an accept bound to this ticket's review head."""
-    head = (t.get("review_head") or "").strip()
-    if not head:
+    """True when the latest verdict on this review head is an accept."""
+    head = (t.get("review_head") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
         return False
-    for ev in t.get("review_events") or []:
-        if not isinstance(ev, dict):
+    for ev in reversed(t.get("review_events") or []):
+        if not isinstance(ev, dict) or ev.get("superseded"):
             continue
-        if (ev.get("kind") or "").strip().lower() != "accept":
+        kind = (ev.get("kind") or "").strip().lower()
+        if kind not in ("accept", "reject"):
             continue
-        sha = (ev.get("sha") or "").strip()
-        if not ev.get("superseded") and _current_release_head_matches(t, sha):
-            return True
+        if _current_release_head_matches(t, ev.get("sha")):
+            return kind == "accept"
     return False
 
 

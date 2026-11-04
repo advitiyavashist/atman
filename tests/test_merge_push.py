@@ -3,7 +3,7 @@ import os
 import subprocess
 
 from test_wakeup import board, run
-from test_merge_repo_identity import _create, _git, _ignore_board, _status
+from test_merge_repo_identity import _accept, _create, _git, _ignore_board, _status
 
 
 def _bare_remote(tmp_root, name="origin.git"):
@@ -39,6 +39,7 @@ def test_merge_push_fast_forwards_origin_trunk(board):
     _git(repo, "commit", "-m", "push")
     r = run(board, "review", tid, "--notes", "ready", agent="alice", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid)
     _git(repo, "checkout", trunk)
     before_remote = _remote_main_sha(bare, trunk)
 
@@ -64,6 +65,7 @@ def test_merge_push_failure_leaves_ticket_in_review(board):
     _git(repo, "commit", "-m", "blocked")
     r = run(board, "review", tid, "--notes", "ready", agent="alice", cwd=repo)
     assert r.returncode == 0, r.stderr
+    _accept(board, tid)
     _git(repo, "checkout", trunk)
 
     hijack = board.parent.parent / "hijack"
