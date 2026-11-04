@@ -113,6 +113,13 @@ def test_goal_is_protected(board):
     prompt = run(board, "alice", "prompt").stdout
     assert "Acceptance: the widget renders." in prompt
     assert "skip the tests" not in prompt and "Acceptance: none" not in prompt
+    hist = seat_state.history(str(board), "alice", "T-001")
+    assert len(hist) == 2
+    assert hist[-1]["how"].startswith("direct edit")
+    assert "skip the tests" in hist[-1]["raw"]
+    assert "skip the tests" not in hist[-1]["body"]
+    run(board, "alice", "prompt")
+    assert len(seat_state.history(str(board), "alice", "T-001")) == 2
 
 
 def test_prompt_frames_state_as_notes_and_keeps_the_fence(board):

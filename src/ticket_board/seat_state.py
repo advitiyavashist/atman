@@ -173,14 +173,14 @@ def _write_md(board, seat, ticket, body):
 
 
 def _file_body(board, seat, ticket_id):
-    """The editable body currently on disk, or None when there is no file."""
+    """The normalized editable body and raw file, or None when absent."""
     try:
         with open(state_path(board, seat, ticket_id), encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return None
     try:
-        return render_body(parse(text))
+        return render_body(parse(text)), text
     except StateError:
         # A hand edit that added a Goal or an unknown section: keep what the
         # known sections say, drop the rest. The raw text stays in the next
@@ -199,7 +199,7 @@ def _file_body(board, seat, ticket_id):
                 continue
             if current:
                 keep[current].append(line)
-        return render_body({k: "\n".join(v) for k, v in keep.items()})
+        return render_body({k: "\n".join(v) for k, v in keep.items()}), text
 
 
 def _reconcile(board, seat, ticket, at):
@@ -209,11 +209,14 @@ def _reconcile(board, seat, ticket, at):
     on_disk = _file_body(board, seat, tid)
     if on_disk is None:
         return hist
-    if hist and _digest(on_disk) == hist[-1].get("sha256"):
+    body, raw = on_disk
+    expected = protected_header(ticket) + "\n\n" + body
+    if (hist and _digest(body) == hist[-1].get("sha256")
+            and raw == hist[-1].get("raw", expected)):
         return hist
     rec = {"v": len(hist) + 1, "at": at, "by": seat, "ticket": tid,
            "how": "direct edit of the .md file (not through atm state)",
-           "sha256": _digest(on_disk), "body": on_disk}
+           "sha256": _digest(body), "body": body, "raw": raw}
     _append(board, seat, tid, rec)
     return hist + [rec]
 
