@@ -7452,6 +7452,14 @@ def cmd_assign(a, board):
     if a.needs is not None:
         t["needs"] = _ids(a.needs)
         changed.append("needs=%s" % (",".join(t["needs"]) or "(none)"))
+    if getattr(a, "token_budget", None) is not None:
+        if a.token_budget < 0:
+            sys.exit("--token-budget must be a token count (0 clears it)")
+        if a.token_budget:
+            t["token_budget"] = a.token_budget
+        else:
+            t.pop("token_budget", None)
+        changed.append("token_budget=%s" % (a.token_budget or "(none)"))
     if getattr(a, "target_repo", None) is not None:
         # T-1135: attribute an existing ticket so automatic claims stop
         # offering it to seats checked out on a different repository. "-"
@@ -9725,7 +9733,7 @@ def _session_usage_claude(cwd, t0, t1):
     Per-message counts ARE additive (unlike codex's cumulative totals): each
     assistant message reports the usage of its own request.
     """
-    tot, seen = {}, False
+    tot, seen, counted = {}, False, set()
     for p in glob.glob(os.path.join(_claude_transcript_dir(cwd), "*.jsonl")):
         # mtime first: a transcript last written before this run started
         # cannot hold any of its messages, and this avoids reading megabytes
@@ -9743,6 +9751,13 @@ def _session_usage_claude(cwd, t0, t1):
             u = m.get("usage") if isinstance(m, dict) else None
             if not isinstance(u, dict):
                 continue
+            # T-023: one assistant message is written once per content block,
+            # each line repeating the same usage. Count the request once.
+            mid = m.get("id") or rec.get("requestId")
+            if mid:
+                if mid in counted:
+                    continue
+                counted.add(mid)
             for src, dst in CLAUDE_USAGE_FIELDS:
                 n = _num(u.get(src))
                 if n is not None:
@@ -11518,6 +11533,75 @@ def _turns_cmd():
             sys.path.insert(0, src)
         from ticket_board.turns import cmd_turns as impl
         return impl
+
+
+def _ticket_meter():
+    _ensure_src_path()
+    from ticket_board import ticket_meter as m
+    return m
+
+
+def meter_board(board, agent=""):
+    """{ticket: totals} across every seat's session log (T-023).
+
+    Claude transcripts live under the seat's worktree slug; codex rollouts
+    are matched by the cwd their session announces. A seat whose harness
+    reports usage nowhere (cursor) contributes nothing -- absent, not zero.
+    """
+    tm = _ticket_meter()
+    events = _safe(lambda: load_trajectories(board), []) or []
+    out = {}
+    for rec in _safe(lambda: load_agents(board), []) or []:
+        owner = rec.get("owner") or ""
+        if not owner or (agent and owner != agent):
+            continue
+        wins = tm.windows(events, owner)
+        if not wins:
+            continue
+        since = min(w[1] for w in wins)
+        dirs = sorted(set(os.path.abspath(d) for d in (rec.get("worktree"), rec.get("cwd")) if d))
+        samples = []
+        for d in dirs:
+            paths = [p for p in glob.glob(os.path.join(_claude_transcript_dir(d), "*.jsonl"))
+                     if _safe(lambda p=p: os.path.getmtime(p), 0) >= since - 1]
+            samples += tm.claude_samples(paths, since=since)
+            rollouts = [p for p in glob.glob(os.path.join(CODEX_SESSIONS_DIR, "**", "*.jsonl"),
+                                             recursive=True)
+                        if _safe(lambda p=p: os.path.getmtime(p), 0) >= since - 1]
+            samples += tm.codex_samples(rollouts, d, _usage_from_codex_event, since=since)
+        tm.merge(out, tm.attribute(sorted(samples, key=lambda x: x[0]), wins))
+    return out
+
+
+def cmd_meter(a, board):
+    """Tokens each ticket consumed, from the session logs, against its budget (T-023)."""
+    tm = _ticket_meter()
+    want = (a.id or "").upper()
+    rows = meter_board(board, agent=a.agent)
+    tickets = dict((t["id"], t) for t in load_all(board))
+    ids = sorted(set(rows) | set(tid for tid, t in tickets.items() if t.get("token_budget")))
+    if want:
+        ids = [want]
+    report = []
+    for tid in ids:
+        row = rows.get(tid) or dict({k: 0 for k in tm.FIELDS}, requests=0, total=0)
+        budget = (tickets.get(tid) or {}).get("token_budget") or 0
+        report.append(dict(row, ticket=tid or None, budget=budget or None,
+                           state=tm.budget_state(row["total"], budget)))
+    if a.json:
+        print(json.dumps({"tickets": report}, indent=2, sort_keys=True))
+        return
+    print("%-10s %9s %9s %9s %9s %6s  %s" % ("ticket", "total", "in+out", "cache-rd", "budget", "reqs", "state"))
+    for r in sorted(report, key=lambda r: (r["ticket"] is None, -r["total"])):
+        print("%-10s %9s %9s %9s %9s %6d  %s" % (
+            r["ticket"] or "(none)", tm.human(r["total"]),
+            tm.human(r["tokens_in"] + r["tokens_out"]), tm.human(r["tokens_cache_read"]),
+            tm.human(r["budget"]) if r["budget"] else "-", r["requests"],
+            {"over": "OVER BUDGET", "warn": ">=80% of budget"}.get(r["state"], r["state"])))
+    if not report:
+        print("no metered tokens: no seat on this board has a claim window with session-log usage")
+    print("(none) = requests made while holding no ticket (reviews, triage). "
+          "Cursor reports usage nowhere and is not metered.")
 
 
 def cmd_turns(a, board):
@@ -23458,6 +23542,8 @@ def main():
     c.add_argument("--by", default="")
     c.add_argument("--notes", "-n", default="", help="why, appended to the recorded change note")
     c.add_argument("--worktree", default=None, help="record checkout and add automated cleanup child")
+    c.add_argument("--token-budget", type=int, default=None, dest="token_budget",
+                   help="cap on tokens this ticket may consume (atm meter); 0 clears")
     c.set_defaults(fn=cmd_assign)
 
     c = sub.add_parser("reserve", help="reserve a ticket for an agent without claiming it")
@@ -23989,6 +24075,13 @@ def main():
                       help="synthesise claim/update/review/done from tickets already on the board")
     x.add_argument("--dry-run", action="store_true", dest="dry_run")
     c.set_defaults(fn=cmd_trajectories, traj_cmd="list", out="", dry_run=False)
+
+    c = sub.add_parser("meter",
+                       help="tokens per ticket from each seat's session log, against its token budget (T-023)")
+    c.add_argument("id", nargs="?", default="", help="only this ticket")
+    c.add_argument("--agent", "-a", default="", help="only this seat")
+    c.add_argument("--json", action="store_true", dest="json")
+    c.set_defaults(fn=cmd_meter)
 
     c = sub.add_parser("turns",
                        help="watch-run turns per ticket (T-312); --json is frozen for the optimizer")
