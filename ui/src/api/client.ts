@@ -20,6 +20,7 @@
 
 import { SCHEMA_OF, type RouteName } from "./types";
 import type {
+  ActionResponse,
   Board,
   Lead,
   NeedsYou,
@@ -188,14 +189,75 @@ export class AtmanApi {
     return this.get<Lead>("lead", "/lead", { project });
   }
 
-  thread(opts: { project?: string; with?: string; before?: string; limit?: number; all?: boolean }): Promise<Thread> {
+  thread(opts: { project?: string; with?: string; re?: string; before?: string; limit?: number; all?: boolean }): Promise<Thread> {
     return this.get<Thread>("thread", "/thread", {
       project: opts.project,
       with: opts.with,
+      re: opts.re,
       before: opts.before,
       limit: opts.limit,
       all: opts.all ? "1" : undefined,
     });
+  }
+
+  /**
+   * POST /api/v1/ticket/{id}/{accept,reject,assign} — the three verbs the
+   * one-screen view runs itself (T-1486 §6.3).
+   *
+   * Each is the CLI function behind the verb, so the server's refusal is the
+   * CLI's own sentence and is passed through word for word. The 200 body is
+   * what was recorded (by, sha, the new status), which is what the result line
+   * shows — never the dialog's inputs. Nothing is retried on its own.
+   */
+  async ticketAction(
+    id: string,
+    action: "accept" | "reject" | "assign",
+    body: Record<string, string>,
+    project?: string,
+  ): Promise<ActionResponse> {
+    if (!this.token) {
+      throw new ApiError(
+        "no write token: open the app that atm ui serves at /app/, or start atm ui --dev-origin <this origin>",
+        0,
+        `/ticket/${id}/${action}`,
+      );
+    }
+    const url = `${this.origin.api}/ticket/${encodeURIComponent(id)}/${action}`;
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Atman-Token": this.token, "X-Atman-Client": "app" },
+        body: JSON.stringify(project ? { ...body, project } : body),
+      });
+    } catch (cause) {
+      throw new ApiError(
+        `no answer from ${this.origin.server} — is atm ui running? (${cause instanceof Error ? cause.message : String(cause)})`,
+        0,
+        url,
+      );
+    }
+    const text = await res.text();
+    let parsed: { ok?: boolean; error?: string } = {};
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      throw new ApiError(`POST ${action} answered ${res.status} with a body that is not JSON`, res.status, url);
+    }
+    if (!res.ok || !parsed.ok) throw new ApiError(parsed.error || `${res.status}`, res.status, url);
+    return parsed as unknown as ActionResponse;
+  }
+
+  accept(id: string, sha: string, notes: string, project?: string): Promise<ActionResponse> {
+    return this.ticketAction(id, "accept", { sha, notes }, project);
+  }
+
+  reject(id: string, sha: string, reason: string, project?: string): Promise<ActionResponse> {
+    return this.ticketAction(id, "reject", { sha, reason }, project);
+  }
+
+  assign(id: string, owner: string, notes: string, project?: string): Promise<ActionResponse> {
+    return this.ticketAction(id, "assign", notes ? { owner, notes } : { owner }, project);
   }
 
   ticket(id: string, project?: string): Promise<Ticket> {

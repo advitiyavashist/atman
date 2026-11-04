@@ -1,11 +1,16 @@
 # The atman app
 
-Chat with the project's lead, beside a live execution plan.
+One screen that answers four questions, top to bottom: what are we trying to
+do, what is happening now, what is stuck, what do I need to decide. Talk to a
+seat beside it. The design is `docs/design/app-v3.md` (approved in T-1485,
+built in T-1486); the clickable mockup it was built from is
+`ui/mockups/app-v3.html`, and the screenshots of the real thing are in
+`docs/design/app-v3/build/`.
 
-A React + TypeScript app that holds **no board data of its own**. Every screen
-is a read of the local JSON API that `atm ui` serves under `/api/v1`
+A React + TypeScript app that holds **no board data of its own**. Every
+section is a read of the local JSON API that `atm ui` serves under `/api/v1`
 (`docs/api/app-v2.md`, schemas in `docs/api/schemas/`). The board and the CLI
-stay in Python; this is a window onto them.
+stay in Python; this is a window onto them, with six buttons.
 
 ## Run it
 
@@ -16,127 +21,108 @@ npm install && npm run build -w ui     # once, and after any change to ui/
 atm ui --operator <your name>          # then open http://127.0.0.1:8765/app/
 ```
 
-`--operator` is the name the composer posts as, and it is the difference between
-reading the board and talking to the lead: without it the app is read-only and
-says so on screen. The name needs `agents/<name>.json` on this board (`atm join
-<name>`) and must not be a harness-run seat — the app posts as a person, never
-as a seat. The server sets `from` itself, records `via: ui-operator`, and wakes
-the recipient exactly as `atm msg` does.
+`--operator` is the name the app acts as. Without it the app is **read-only**
+and says so at the top (`Read-only. Start with atm ui --operator <name> to
+act.`); every button is disabled with that reason beside it. The name needs
+`agents/<name>.json` on this board (`atm join <name>`) and must not be a
+harness-run seat.
 
-`atm ui` serves the built bundle at `/app/` on the same origin as the API, which
-is what makes the composer work at all: it inserts the per-launch write token
-into the page as a meta tag, and `POST /msg` only accepts a request whose
-`Origin` is its own `Host`. Nothing binds to anything but loopback.
+## What you see
 
-### What you should see
+**Top bar.** The wordmark, the project switcher (every board in
+`~/.config/atman/board.json`, each with its workload: `1 working · 1 done`,
+never `0 open` beside live work), `You are boss`, and the **Details** toggle.
+Details is off by default; everything diagnostic (phases, evidence, review
+heads, diff commands, receipts, harness badges, usage with its age, transcript
+paths, "Board read 2 s ago") is behind it.
 
-**The shell.** A sidebar with the project switcher (every board in
-`~/.config/atman/board.json`, the started one first, each with its open count
-and its lead) and five views: Lead, Plan, Needs you, Fleet, Runs. At 1440px the
-chat, the plan and the drill-down read at once. At 390px the sidebar becomes a
-top bar, chat and the centre view become two tabs, and the drill-down is a
-full-screen sheet. The URL hash is `#<view>` or `#<view>/T-123`, so a step you
-are looking at can be reloaded or handed to someone else.
+**Objective.** The objective sentence, `Done when …`, and `1 of 3 accepted`
+with a thin bar. Done-not-accepted never counts as accepted; when there is any
+it reads `· 1 done, not accepted`. No objective: `No objective yet. Say what
+this board is for.` with `Set objective…` (a sheet with the exact command).
 
-**Lead** — the chat, on the left of every view.
+**Now strip.** Four pills, read straight from `plan.counts` and
+`needs-you.count`, nothing added client-side: `2 working · 1 needs you · 1
+blocked · 1 done`. Zero is `0 blocked` in grey, never hidden. Plan unavailable:
+`Board unavailable`.
 
-- A title pill: `lead · seat@project`, the seat's harness, and whether it
-  **takes mid-run messages** or **answers on its next turn** (the line comes
-  from the same table `atm steer` uses).
-- A status strip: liveness, the running ticket and how long it has been going,
-  when output was last seen, any limit, auth, and the harness usage reading
-  **with its age**. A reading that was never taken says `share unknown` and
-  `age unknown` — never a number, never a fresh-looking one.
-- Posts, oldest first, opening on the newest. Each shows `seat@project`, a
-  harness badge (`unknown · not recorded` when the board has no harness stamped
-  at post time — it is never filled in from anything else), your own local
-  time, a copy button, and its **delivery receipts**, labelled as receipts:
-  *posted · inbox read · wake confirmed*. A receipt is never an agent saying
-  yes, and a word that reads like one is refused on screen.
-- **Load older messages** pages back through the whole live log, not the
-  snapshot's newest 40.
-- When the lead cannot answer — limited, logged out, at quota, no live
-  session — a plain line says so, with the command that fixes it, and says your
-  message still lands on the board.
-- The composer posts **as the operator** — the name `atm ui --operator <name>`
-  was started with. The server sets `from` itself, records `via: ui-operator`,
-  and wakes the recipient the same way `atm msg` does; the app never offers to
-  post as a seat. Started without an operator, the app says *read-only: no
-  operator configured* and shows the exact command instead of a Send button
-  that could only fail.
-- On a project with no lead picked, you get a **picker** of every registered
-  seat with its harness and capability line — and no guess. The app never falls
-  back to the master or the CoS.
+**Presence strip.** Every registered seat: a dot, its name, and what it is
+doing now in a few words (the running ticket's last note, first clause, never
+generated). Six visuals, six states: working (solid green), idle (grey ring,
+`idle 2 h`), host offline (ring with a slash, the API's `adapter_reason` on
+hover), limited (amber, `limited until 17:40`), logged out (amber ring),
+unknown (dotted ring with `?`, a seat the board never saw). Clicking a seat
+opens Talk with it.
 
-**Plan** — the centre, from `/api/v1/plan`. The objective and its exit
-criterion, the counts, then every step in dependency order with its owner as
-`seat@project`, its state, a *running* chip when a run is open on it, and a
-typed **blocker chip** with the copyable command that clears it:
+**Sections**, in a fixed order, each collapsing to one line when empty:
 
-| chip | what it means |
-|---|---|
-| dependency not accepted | the dep is finished, but nobody accepted it |
-| dependency still open | the dep has not finished (or is not on this board) |
-| seat limited | the owner is limited, with the reset time |
-| seat offline | the owner has no live session |
-| auth | the owner's harness is logged out |
-| hold · capture · blocked | recorded waits |
-| done, not accepted | this step is finished with no accept |
+| Section | Cards | Buttons |
+|---|---|---|
+| Needs you | tickets in review (`worker finished it 5 min ago. Waiting for your accept.` with `Review head 3f2a1c0 · <the seat's notes>`), questions (`worker asked 20 min ago about T-001: "…"`), stuck posts, limited / logged-out / stopped seats holding work, escalated automated nodes. Four filter chips: All · Mentions · Accept · Blocked; filtering never changes a count | **Accept 3f2a1c0** · Reject… · Message · Answer · Reassign… · Start… · Open |
+| Working | `worker has it, running for 12 min.` / `…last update 40 min ago.` / `…but has been silent for 2 h.` / `Posted to the board 8 min ago. Nobody has picked it up.` Empty: `Nobody is working. Assign a ticket or start an agent.` with **Assign…** then `Start an agent…` | Message |
+| Blocked | `Blocked by worker 40 min ago: "<reason>"`, `worker is limited until 17:40. Nothing runs on it until then.`, `worker has no live session.`, `worker is logged out. Run atm harness auth worker.`, `On hold: …` | Answer · Reassign… · Message |
+| Up next | `Nobody has it. Ready to start.` / `Nobody has it. Waits on T-001, which is in review.` / `Waits on T-001, which is done but not accepted.` / `Reserved for worker.` | Assign… · Message |
+| Done (collapsed) | `Accepted by boss 2 h ago on 3f2a1c0.` with the proof line; `Marked done by worker 2 h ago. Not accepted yet.`; an accept not bound to a review head shows the T-1459 sentence in full | — |
 
-Work that is done without a structured accept **never renders as accepted**. It
-reads *done, not accepted*; a release override reads *done, released by
-override (not accepted)*. The label is derived from the record, so a
-`status_label` that claimed otherwise could not put the word on screen — and
-the step says that the label was refused.
+Exactly one sentence per card, in plain words. Clicking a card (or `Open ›`)
+opens its **thread panel**: the sentence, the same buttons, every message about
+the ticket with its own composer, the ticket text, what it waits on, the review
+(submitted by, the full 40-character head, branch, verdicts with *superseded*
+and *not bound to the current review head* marked), the acceptance proof, and
+Details (runs with `unknown` tokens where none were recorded, usage with its
+age, the copyable diff command). `#T-001` in the URL opens it; `Esc` closes
+it; at 1440 px it is a resizable side panel, at 390 px a full-screen sheet.
 
-**Drill-down** — click a step (or a ticket id anywhere), from
-`/api/v1/ticket/{id}`. Runs with seat, harness, role, elapsed time and tokens
-(`unknown` when the board never recorded them — never 0); usage readings each
-with their age; the **full 40-character review head**, because an accept is
-bound to exactly that sha; verdicts, with *superseded* and *not bound to the
-current review head* marked, since a stale accept is not an accept of this
-work; the handoff; the messages about it; the steers with their receipts;
-branch, commit, PR; and the **copyable diff command** — a read route runs no
-git, so the app hands you the command instead of a diff it cannot produce.
-*back to plan* closes it.
+**Talk.** `Talk to [worker ▾]`: the board's chosen lead (`Set as lead` records
+one with `POST /api/v1/lead`), else the one running seat, else **Everyone on
+the board** (`No agent is running. Messages land on the board; the next agent
+that wakes reads them.`). Never an idle seat picked for you. The state line is
+the seat's record: `running T-002 for 12 min`, `idle since 2 h`, `limited until
+17:40`, `not running · host offline`. The composer posts as the operator
+(`POST /msg`): **Enter sends, Shift+Enter adds a line**, nothing is sent during
+an IME composition, `@seat` and `#T-001` autocomplete (Enter picks, never
+sends), `about [T-002 ▾]` defaults to the ticket the seat is running, and an
+unsent draft is kept per (board, recipient, ticket) in the browser.
 
-**Needs you** — the read-only queue. Messages that named you with no reply,
-prose that says DECIDE, `stuck:` posts older than an hour, escalated automated
-nodes. Every item is *asked (unstructured)*: the board holds no decision
-records yet, so prose containing the word "ruling" is still an ask, never a
-ruling. Answering happens in the chat.
+## The buttons
 
-**Fleet** — this project's seats: state, harness, lifecycle, wake mode,
-reachability, limit, auth, with the recovery command where there is one. The
-screen says what the harness column is: **each seat's value now** — its
-workforce entry, or the provider of a live session — with `unknown` for a seat
-that has none recorded (since #267 the route no longer invents one). It is not
-a stamp on a run or a post, so for what a seat was running when it wrote
-something, the chat's per-post badge is the one to read.
+Every verb is one real `<button>`. A trailing `…` means a dialog asks for what
+the verb needs. A disabled button always has its reason as visible text beside
+it (`You wrote this, so you can't accept it.`, `Nothing was submitted for review
+yet.`, `Pick a seat first.`, the read-only line). After a verb runs, the row is
+replaced by one result line built from **what the API returned**, not the
+dialog's inputs: `Accepted · by boss · 3f2a1c0`, `Rejected · by boss · 3f2a1c0
+· back with worker`, `Assigned · to worker · by boss`. It stays until the next
+board read redraws the card.
 
-**Runs** — seat runs grouped by ticket, with elapsed time and token counts, and
-`unknown` wherever a count was never recorded.
+| Button | Calls | Gate |
+|---|---|---|
+| Accept 3f2a1c0 | `POST /api/v1/ticket/T-001/accept {sha, notes}` — `atm accept` | `accept_ticket` → `review_verdict.apply(require_full=True)`: operator ≠ author, the full 40-character submitted head, notes required. Before posting, the app re-reads the ticket; a changed head replaces the button with `Changed since you opened this: new head 9c1d2e3` and **Review again** (nothing is posted). The poll does the same while the dialog is open |
+| Reject… | `POST /api/v1/ticket/T-001/reject {sha, reason}` — `atm reject` | same binding; the ticket goes back to its author as claimed |
+| Assign… / Reassign… | `POST /api/v1/ticket/T-004/assign {owner, notes}` — `atm assign --owner` | a registered seat, chosen by you; a limited or logged-out seat is shown with its state and a warning, never hidden |
+| Message / Answer / Send | `POST /msg` | existing; the server fixes `from` to the operator |
+| Set as lead | `POST /api/v1/lead` | existing |
+| Start an agent… / Set objective… / Create ticket… | nothing — a sheet with the exact command and Copy | a spawn carries your credentials; the app never launches a process |
 
-Anything the board does not hold is rendered, visibly, as `unknown` or *not
-recorded*, in italics. A read that fails says so where the data would have
-been: a screen of nothing would look exactly like an empty board, and those are
-different things. When a **refresh of the same screen** fails, the last good
-data stays up and the line at the top names the read that failed — wiping a
-screen someone is reading would be both less useful and less honest.
+A refusal comes back in the dialog in the server's own sentence, with the
+button re-enabled; nothing is retried on its own. The gate is the CLI's
+function in every case, so the app can refuse nothing the CLI allows and allow
+nothing it refuses.
 
-**Records are only ever shown under the project they were read from.** A value
-is held together with the question it answered, so switching project withholds
-the previous board's payload immediately: if the new read then fails, the pane
-says so instead of the shell pairing one board's steps, seats and objective
-with the other board's slug. The same rule holds the drill-down to the ticket
-that is actually open — one ticket's runs, review and accept are never shown
-under another's id. Mislabelling one project's work as another's is the worst
-thing this app could do, and it is the one behaviour with regression tests
-named after it.
+## What this app will not do
 
-Keyboard: the first tab stop in the chat is **Skip to the composer**, because a
-hundred-post thread is a few hundred controls deep. Focus is visible on
-everything, and every state has a word as well as a colour.
+- **Never invent a provider, a token count, a percentage, a time or an accept.**
+  A value the board never recorded renders as the shorter sentence, `unknown`
+  or *not recorded* — never as a number, never as a fresh-looking one.
+- **Never pick a lead for you**, never prefill a ticket that is not on this
+  board, never offer "accept latest" or an accept without notes.
+- **No second network peer.** `atm ui` on loopback and nothing else: no
+  analytics, no web font, no CDN. The refusal is in `api/client.ts` and tested.
+- **Colour never carries a state on its own.** Every state has a word, and the
+  presence dots differ in shape as well as colour.
+- **Records are only ever shown under the project they were read from.** A
+  switch withholds the previous board's payload at once; a failed refresh of
+  the same screen keeps the last good data and says the read failed.
 
 ## Develop it
 
@@ -145,92 +131,36 @@ atm ui --dev-origin http://localhost:5173        # tell the API about the dev se
 npm run dev -w ui                                # then open http://localhost:5173/
 ```
 
-The dev server is a different origin from the API, so:
-
-- the write token comes from `GET /api/v1/session` with `X-Atman-Client: app`,
-  which forces a CORS preflight that only the app's own origin or a
-  `--dev-origin` passes;
-- point the app at a port other than the default 8765 with
-  `?api=http://127.0.0.1:<port>`. A value that is not a loopback origin is
-  refused, with the reason on screen, and no request is made;
-- **the composer cannot post from the dev server.** `POST /msg` sends no CORS
-  headers and refuses an `Origin` that is not its `Host`, and the API adds no
-  message route of its own. The app says this instead of showing a network
-  error. Post from the bundle at `/app/`.
-
-In dev, every response is validated against its schema in
-`docs/api/schemas/` and a violation is printed to the console once per route.
-That check and ajv are **absent from a production build**: they sit behind
-`import.meta.env.DEV` and a dynamic import, so `grep -c "schemas.atman.invalid"
-dist/assets/*.js` is 0 after `npm run build -w ui`.
+On the dev server the write token comes from `GET /api/v1/session`; `POST
+/msg` is same-origin only, so the composer works from the served bundle at
+`/app/`. In dev every response is validated against its schema in
+`docs/api/schemas/` and a violation is printed once per route; that check and
+ajv are absent from a production build.
 
 ## Test it
 
 ```sh
-npm test -w ui          # vitest: 146 tests, 10 files
+npm test -w ui          # vitest
 npm run build -w ui     # tsc -b && vite build — also the type-check gate
 ```
 
 | file | what it holds to account |
 |---|---|
-| `mapping.test.ts` | every honesty rule as a pure function: blocker chips, accept states, usage age, unknown harness, tokens, receipts, review head, ticket links, verdict shapes, one phrase per step |
-| `client.test.ts` | where the app may talk (loopback only), what it sends, what it refuses to send |
-| `writes.test.ts` | the `/api/v1/lead` **request** body against `lead-request.json`, and both refusal paths |
-| `polling.test.ts` | a failed refresh of the same screen keeps the last good read; a project switch or a ticket change whose read fails shows the error and never the other project's or ticket's records |
-| `blanking.test.tsx` | the payload shapes and the shell throw that used to leave an empty page |
-| `fixtures.test.ts` | the fixture generator itself, including that it refuses a field the schema lacks |
-| `screen-*.test.tsx` | one file per screen, mounted: chat, plan, drill-down, and needs-you / fleet / runs / shell |
+| `v3-model.test.ts` | the spec's tables as pure functions: one sentence per card (§5.3), six presence states (§5.8), buckets, the four counts, progress, the needs-you filters, who the operator talks to |
+| `v3-states.test.tsx` | every §7 state mounted: empty, fresh, working, needs-you (filters, Accept dialog with the full head), blocked, accepted (proof), offline (limited seat, unknown seat), self-review (disabled with the reason), read-only, Details, the Done fold |
+| `v3-actions.test.tsx` | Accept, Reject, Assign end to end: what is posted, the result line from the response, a refusal in the API's words, the stale-head guard (re-read and poll), the result line's lifetime, Message / Answer |
+| `v3-talk.test.tsx` | Enter / Shift+Enter / IME, drafts per ticket, `@` and `#` autocomplete that never sends, ticket badges only for tickets on the board, the panel's thread and composer, the recipient rule, Set as lead |
+| `mapping.test.ts` | the honesty rules as pure functions: blocker chips, accept states, usage age, unknown harness, tokens, receipts, review head, acceptance proof (T-1459) |
+| `client.test.ts` · `writes.test.ts` | where the app may talk (loopback only), what it sends, what it refuses to send |
+| `polling.test.tsx` · `blanking.test.tsx` | a failed refresh keeps the last good read; a project switch never shows the other board's records; a payload the contract forbids never blanks the page |
+| `fixtures.test.ts` | the fixture generator itself |
 
-The fixtures are **generated from the schemas** (`tests/ui/support/schema.ts`):
-each test's payload starts as a minimal instance of the real schema file, the
-case under test is merged on top, and the result is validated with ajv. A field
-that leaves the contract leaves every fixture at once, and a field a test
-invents fails there instead of rendering as `undefined`. The generator's
-defaults are the honest ones — a nullable number is `null`, a stamp is `""` —
-and the schema's own `if`/`then` rules are applied, which is how an unaged
-usage reading keeps `age: "age unknown"` and a null token count keeps
-`tokens_label: "unknown"`.
+The fixtures are generated from the schemas (`tests/ui/support/schema.ts`);
+the §7 boards are `tests/ui/support/v3.ts`. `npm test` starts no browser. The
+screenshots are `scripts/app_v3_shots.py`: it seeds one throwaway board per
+state, serves it with the real `atm ui`, and captures 1440 and 390 with
+Playwright, refusing a state whose page scrolls sideways.
 
-`npm test` does not start a browser. The real-data check is the two commands at
-the top of this file, against a throwaway board.
-
-## What this app will not do
-
-- **Never invent a provider, a token count, a percentage or an accept.** Every
-  one of those has a test.
-- **No writes beyond two.** The composer (`POST /msg`, as the operator) and the
-  lead picker (`POST /api/v1/lead`). There is no accept, reject, merge, done,
-  claim, assign, dispatch, spawn or objective-set route in the API, in any
-  phase; the app shows the copyable command instead.
-- **No second network peer.** `atm ui` on loopback, and nothing else: no
-  analytics, no web font, no CDN, no external script. The refusal is in
-  `api/client.ts` and tested.
-- **No polish that outruns the data.** Colour never carries a state on its own;
-  every state also has a word.
-
-## Known limits
-
-- **Posting needs an operator, by design.** Started without
-  `--operator <name>`, the app is read-only and says so; the read screens are
-  all live either way. The name must have `agents/<name>.json` on the board and
-  must not be a harness-run seat — the app posts as a person, never as a seat.
-- **`agent_map` rows are not contract.** `board.json` types only
-  `agent_map.groups`, so the Runs screen treats every field of a row as
-  possibly absent. One field bit: a run's `verdict` is `{kind, sha}` there and a
-  plain string on `ticket.json`. It goes through `verdictChip` now, rendering
-  the raw object having blanked the whole page once.
-- **A blank page is treated as a bug, everywhere.** `main.tsx` mounts `Root`,
-  which is the app inside a boundary, each column has its own boundary, and the
-  shell checks a list's shape before walking it. `tests/ui/blanking.test.tsx`
-  holds the shapes that used to do it: a `nodes` that is not a list, a snapshot
-  with no `agents`, and a throw in the shell above every column boundary.
-- **`agents[].harness` is current, not historical.** Since #267 it reads
-  `unknown` for a seat with nothing recorded, so the column is honest — but it
-  is still the seat's value *now*, with no "as of when" on this route. The
-  caption says so, and `post.harness.recorded` is what makes the chat's badge a
-  statement about the past.
-- **The plan is a list, not a graph.** Layers and dependency order come from
-  the API and read top-down. The graph and column layouts are a later phase.
-- **The thread polls.** Every read refreshes on a timer; there is no event
-  route, and token streaming would mean reading harness transcripts, which this
-  product does not do.
+The Python side of the same contract is `tests/test_t1486_app_actions.py`
+(the three write routes, `thread?re=`, the needs-you kinds) and
+`tests/test_t1103_app_api.py` (every route against its schema).

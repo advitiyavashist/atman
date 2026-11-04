@@ -1,63 +1,69 @@
 /**
- * The shell: sidebar, chat with the lead on the left, the plan in the centre,
- * the drill-down on the right.
+ * The one-screen operator view (docs/design/app-v3.md).
  *
- * At 1440px all three read at once, which is the whole point of the app — you
- * talk to the lead while the plan is in view and a step's evidence is one
- * click away. Under 900px the drill-down becomes a sheet over the layout;
- * at 390px the sidebar is a top bar and chat and the centre view are two tabs.
+ * Top to bottom it answers four questions: what are we trying to do
+ * (Objective), what is happening now (the four counts, presence, Working),
+ * what is stuck (Blocked), what do I need to decide (Needs you, with its
+ * buttons). Talk sits beside it; a ticket's thread opens as a panel.
+ * Everything else is behind one Details toggle.
  *
- * Every screen here is a read of `atm ui`'s JSON API, polled. The one write
- * this phase has is the composer (`POST /msg`, as the operator) and the lead
- * picker (`POST /api/v1/lead`). With no operator configured the app says so
- * and stays read-only rather than failing at the moment you press Send.
+ * Every section is a read of `atm ui`'s JSON API, polled. The writes are the
+ * composer (`POST /msg`, as the operator), the lead picker, and the three
+ * verbs that are the CLI's own functions: accept, reject, assign. With no
+ * operator configured every verb is disabled and says why.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AtmanApi } from "./api/client";
-import { FleetPane } from "./components/FleetPane";
-import { LeadPane } from "./components/LeadPane";
-import { NeedsYouPane } from "./components/NeedsYouPane";
-import { PlanPane } from "./components/PlanPane";
-import { RunsPane } from "./components/RunsPane";
+import type { NeedsYouItem, PlanNode, Post } from "./api/types";
 import { Boundary } from "./components/Boundary";
-import { Sidebar, VIEWS, type ViewName } from "./components/Sidebar";
-import { TicketPane } from "./components/TicketPane";
+import { type ResultLine } from "./components/Buttons";
+import { BlockedSection, DoneSection, NeedsYouSection, UpNextSection, WorkingSection, groupNodes } from "./components/Cards";
+import { AcceptDialog, AssignDialog, CommandSheet, RejectDialog, StartSheet, assignable } from "./components/Dialogs";
+import { asPost } from "./components/Message";
+import { PresenceStrip } from "./components/Presence";
+import { Talk } from "./components/Talk";
+import { TicketPanel } from "./components/TicketPanel";
+import { ActionButton } from "./components/Buttons";
 import { Command, Failure } from "./components/bits";
 import { ago } from "./lib/format";
-import { ticketIdsOf } from "./lib/map";
+import { projectWorkloadLine } from "./lib/map";
+import { defaultRecipient, nodeIndex, progressOf, short, stripOf, type NeedsFilter } from "./v3/model";
+import { headOf, type DialogSpec, type Screen } from "./v3/screen";
+import { DONE_OPEN_KEY, storeGet, storeSet } from "./v3/store";
 import { useResource } from "./state/useResource";
 
 const POLL_MS = 8000;
 
-function useClock(): string {
+function useClock(everyMs: number): Date {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), 1000);
+    const id = window.setInterval(() => setNow(new Date()), everyMs);
     return () => window.clearInterval(id);
-  }, []);
-  return now.toLocaleTimeString();
+  }, [everyMs]);
+  return now;
+}
+
+/** `#T-001` in the URL opens that ticket's panel (§9 decision 5); no other routing. */
+function hashTicket(): string {
+  const raw = typeof location === "undefined" ? "" : location.hash.replace(/^#/, "");
+  return /^T-\d{1,7}$/.test(raw) ? raw : "";
+}
+
+function phone(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(max-width: 960px)").matches;
+}
+
+interface Kept extends ResultLine {
+  /** The card as it was when the line was written; the line goes when the board redraws it. */
+  phase: string;
+  owner: string;
+  label: string;
 }
 
 /**
- * The URL hash is `#<view>` or `#<view>/<ticket>`, so a view and an open
- * drill-down can both be linked, reloaded and shared with whoever is looking
- * at the same board.
- */
-function routeFromHash(): { view: ViewName; ticket: string } {
-  const raw = (typeof location === "undefined" ? "" : location.hash.replace(/^#/, "")).split("/");
-  const view = (VIEWS as readonly string[]).includes(raw[0]) ? (raw[0] as ViewName) : "lead";
-  const ticket = /^T-\d{1,7}$/.test(raw[1] || "") ? raw[1] : "";
-  return { view, ticket };
-}
-
-/**
- * What `main.tsx` mounts: the app inside a boundary of its own.
- *
- * The three column boundaries cannot catch a throw in the shell above them,
- * and without this one such a throw leaves `#root` empty with nothing but a
- * console line — the least honest failure this app could have. This one is the
- * floor: whatever happens, the page says something.
+ * What `main.tsx` mounts: the app inside a boundary of its own, so a throw in
+ * the shell still leaves a page that says something rather than nothing.
  */
 export function Root({ api }: { api?: AtmanApi } = {}) {
   return (
@@ -69,143 +75,200 @@ export function Root({ api }: { api?: AtmanApi } = {}) {
 
 export function App({ api: injected }: { api?: AtmanApi } = {}) {
   const api = useMemo(() => injected ?? new AtmanApi(), [injected]);
-  const clock = useClock();
-  const [view, setView] = useState<ViewName>(() => routeFromHash().view);
-  const [project, setProject] = useState<string>("");
-  const [selected, setSelected] = useState<string>(() => routeFromHash().ticket);
-  // Under 900px chat and the centre view are tabs. Default to the centre
-  // (Plan / Needs you / …) so objective, blocker and next owner are on screen
-  // at 390px without an extra tap — the lead picker stays one Chat tap away.
-  const [tab, setTab] = useState<"chat" | "centre">(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return "chat";
-    return window.matchMedia("(max-width: 900px)").matches ? "centre" : "chat";
-  });
+  const now = useClock(30_000);
+  const [project, setProject] = useState("");
+  const [panel, setPanel] = useState<string>(() => hashTicket());
+  const [dialog, setDialog] = useState<DialogSpec | null>(null);
+  const [recipient, setRecipient] = useState<string | null>(null);
+  const [about, setAbout] = useState<string | null>(null);
+  const [filter, setFilter] = useState<NeedsFilter>("all");
+  const [details, setDetails] = useState(false);
+  const [tab, setTab] = useState<"board" | "talk">("board");
+  const [doneOpen, setDoneOpen] = useState<boolean>(() => storeGet<boolean>(DONE_OPEN_KEY, false));
+  const [results, setResults] = useState<Map<string, Kept>>(() => new Map());
+  const [focusToken, setFocusToken] = useState(0);
+  const [older, setOlder] = useState<{ key: string; posts: Post[] }>({ key: "", posts: [] });
+  const seenTalk = useRef("");
+  const seenNeeds = useRef(-1);
 
   const session = useResource(() => api.session(), [api]);
   const projects = useResource(() => api.projects(), [api], POLL_MS * 4);
 
-  // The started board is the default; the operator can switch from the sidebar.
   useEffect(() => {
     if (project) return;
     const slug = session.data?.project || projects.data?.current || "";
     if (slug) setProject(slug);
   }, [project, projects.data?.current, session.data?.project]);
 
-  // Every read below is scoped to one board, so none of them fires until the
-  // shell knows which board that is. Reading the started board first and the
-  // chosen one a moment later would put one project's records on screen on the
-  // way to another's, which is exactly the pairing this app must never make.
   const on = project || undefined;
   const ready = !!project;
   const board = useResource(() => api.board(on), [api, on], POLL_MS, ready);
   const plan = useResource(() => api.plan(on), [api, on], POLL_MS, ready);
-  const lead = useResource(() => api.lead(on), [api, on], POLL_MS, ready);
-  const leadSeat = lead.data?.lead || "";
-  const thread = useResource(
-    () => api.thread({ project: on, with: leadSeat || undefined }),
-    [api, on, leadSeat],
-    POLL_MS,
-    ready,
-  );
   const needsYou = useResource(() => api.needsYou(on), [api, on], POLL_MS, ready);
-  const ticket = useResource(
-    () => api.ticket(selected, on),
-    [api, on, selected],
-    POLL_MS,
-    ready && !!selected,
+
+  // Records are only ever shown under the project they were read from.
+  const boardData = board.data && (!board.data.project || board.data.project === project) ? board.data : null;
+  const planData = plan.data && (!plan.data.project || plan.data.project === project) ? plan.data : null;
+  const needsData = needsYou.data;
+
+  const operator = session.data?.operator ?? boardData?.app?.operator ?? "";
+  const operatorNote = session.data?.operator_note ?? boardData?.app?.operator_note ?? "";
+  const readOnly = !operator;
+  const lead = boardData?.app?.lead || "";
+  const agents = Array.isArray(boardData?.agents) ? boardData.agents : null;
+  const nodesList: PlanNode[] = Array.isArray(planData?.nodes) ? planData.nodes : [];
+  const nodes = useMemo(() => nodeIndex(nodesList), [nodesList]);
+
+  const talkWith = recipient ?? defaultRecipient(lead, agents || [], nodesList);
+  const talkSeat = talkWith === "everyone" ? "" : talkWith;
+  const thread = useResource(() => api.thread({ project: on, with: talkSeat }), [api, on, talkSeat], POLL_MS, ready && !!talkSeat);
+  const threadData = thread.data && (!thread.data.project || thread.data.project === project) && thread.data.with === talkSeat ? thread.data : null;
+  // The snapshot window is newest first; the thread reads oldest first, newest visible.
+  const broadcast = useMemo(
+    () => (Array.isArray(boardData?.messages) ? boardData.messages.map(asPost).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)) : null),
+    [boardData],
   );
 
+  const panelTicket = useResource(() => api.ticket(panel, on), [api, on, panel], POLL_MS, ready && !!panel);
+  const panelThread = useResource(() => api.thread({ project: on, re: panel }), [api, on, panel], POLL_MS, ready && !!panel);
+  const ticketData = panelTicket.data && panelTicket.data.id === panel && (!panelTicket.data.project || panelTicket.data.project === project) ? panelTicket.data : null;
+  const aboutData = panelThread.data && panelThread.data.re === panel ? panelThread.data.messages : null;
+
+  // The about control defaults to the ticket the recipient is running (§5.6).
+  const runningOf = (seat: string) => nodesList.find((n) => n.owner === seat && n.phase === "working")?.id || "";
+  const aboutId = about ?? (talkSeat ? runningOf(talkSeat) : "");
+
   useEffect(() => {
-    const onHash = () => {
-      const route = routeFromHash();
-      setView(route.view);
-      setSelected(route.ticket);
-    };
+    const onHash = () => setPanel(hashTicket());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  function goTo(v: ViewName, ticket: string) {
-    setView(v);
-    setSelected(ticket);
-    if (typeof location !== "undefined") location.hash = ticket ? `${v}/${ticket}` : v;
+  // A result line stays until the next board read redraws the card (§6.1).
+  useEffect(() => {
+    if (!planData && !needsData) return;
+    setResults((prev) => {
+      let changed = false;
+      const next = new Map(prev);
+      for (const [id, kept] of prev) {
+        const node = nodes.get(id);
+        if (node) {
+          if (node.phase !== kept.phase || (node.owner || "") !== kept.owner || (node.review?.label || "") !== kept.label) {
+            next.delete(id);
+            changed = true;
+          }
+        } else if (needsData && !needsData.items.some((it) => it.id === id)) {
+          next.delete(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [planData, needsData, nodes]);
+
+  const open = useCallback((id: string) => {
+    setPanel(id);
+    if (typeof location !== "undefined") location.hash = id;
+  }, []);
+  const close = useCallback(() => {
+    setPanel("");
+    if (typeof location !== "undefined" && location.hash) history.replaceState(null, "", location.pathname + location.search);
+  }, []);
+  const message = useCallback((to: string, re: string) => {
+    setPanel("");
+    setRecipient(to || "everyone");
+    setAbout(re || "");
+    setTab("talk");
+    setFocusToken((n) => n + 1);
+  }, []);
+
+  function keep(id: string, line: ResultLine) {
+    const node = nodes.get(id);
+    setResults((prev) => new Map(prev).set(id, { ...line, phase: node?.phase || "", owner: node?.owner || "", label: node?.review?.label || "" }));
   }
 
-  function goView(v: ViewName) {
-    goTo(v, selected);
-    setTab(v === "lead" ? "chat" : "centre");
-  }
-
-  function openTicket(id: string) {
-    goTo(view, id);
-  }
-
-  // Shapes are checked before they are walked, because everything from here
-  // up to <Root> is outside the per-column boundaries: a throw here blanks the
-  // page, and a blank page looks exactly like an empty board.
   /**
-   * Records are only ever shown under the project they were read from.
-   *
-   * `useResource` already withholds a value read for other deps, and this is
-   * the second lock on the same door, because the failure it prevents is the
-   * worst this app has: a payload from one board rendered beside another
-   * board's slug. Every screen composes `seat@project` from the shell's
-   * project, so one wrong pairing turns another project's work into this
-   * project's work on screen. A payload whose own `project` is not the
-   * selected one is therefore treated as absent, and the pane says it could
-   * not be read.
+   * After a verb runs, the result line stands in for the buttons until the
+   * next board read redraws the card in its new state (§6.1). That read is
+   * the regular poll, not a forced one: the line is what the API returned,
+   * and the operator gets to see it. The open panel re-reads at once, since
+   * its verdict list is the record the line summarises.
    */
-  function onThisProject<T extends { project?: string }>(r: { data: T | null }): T | null {
-    const d = r.data;
-    if (!d) return null;
-    if (!project || !d.project) return d;
-    return d.project === project ? d : null;
+  function afterAction() {
+    if (panel) {
+      panelTicket.reload();
+      panelThread.reload();
+    }
   }
 
-  /**
-   * A failed refresh does not erase what is already on screen — but only for
-   * the same question.
-   *
-   * With data to show, the pane keeps it and the freshness line carries the
-   * failure: wiping a screen an operator is reading is less useful and less
-   * honest than saying "this is what we last saw, and the last read failed".
-   * With nothing to show for *this* project, the pane gets the error, which is
-   * what a read that failed after a project switch must do.
-   */
-  const stale = (data: unknown, error: unknown, mismatch = false) =>
-    data ? null : error || (mismatch ? new Error(`that read was for another project, not ${project}`) : null);
+  const checkHead = (id: string) => async () => (await api.ticket(id, on)).review.head.toLowerCase();
 
-  const boardData = onThisProject(board);
-  const planData = onThisProject(plan);
-  const leadData = onThisProject(lead);
-  const threadData = onThisProject(thread);
-  // needs-you carries no project of its own, so the deps gate in useResource is
-  // the only thing standing between it and a mislabel; it is enough, because a
-  // switch withholds the previous board's items outright.
-  const needsYouData = needsYou.data;
-  /** The drill-down must show the ticket that is open, or nothing. */
-  const ticketData =
-    ticket.data && ticket.data.id === selected && (!ticket.data.project || ticket.data.project === project)
-      ? ticket.data
-      : null;
+  async function doAccept(id: string, head: string, notes: string) {
+    const res = await api.accept(id, head, notes, on);
+    keep(id, { text: `Accepted · by ${res.by}`, proof: short(res.sha) });
+    setDialog(null);
+    afterAction();
+  }
+  async function doReject(id: string, head: string, reason: string) {
+    const res = await api.reject(id, head, reason, on);
+    keep(id, { text: `Rejected · by ${res.by}`, proof: short(res.sha), tail: res.returned_to ? `back with ${res.returned_to}` : "" });
+    setDialog(null);
+    afterAction();
+  }
+  async function doAssign(id: string, seat: string, why: string) {
+    const res = await api.assign(id, seat, why, on);
+    const reserved = res.changed.some((c) => c.startsWith("reserved for"));
+    keep(id, { text: `${reserved ? "Reserved" : "Assigned"} · ${reserved ? "for" : "to"} ${res.owner || seat} · by ${res.by}` });
+    setDialog(null);
+    afterAction();
+  }
+  async function send(to: string, re: string, text: string) {
+    await api.postMessage({ from: operator, text, to: to === "everyone" ? undefined : to, re: re || undefined });
+    thread.reload();
+    board.reload();
+    if (panel) panelThread.reload();
+    needsYou.reload();
+    return { to, about: re, posted: "posted" };
+  }
+  async function setLead(seat: string) {
+    await api.setLead(seat, on);
+    board.reload();
+  }
+
+  const screen: Screen = {
+    project,
+    operator,
+    readOnly,
+    nodes,
+    agents: agents || [],
+    details,
+    now,
+    open,
+    message,
+    act: setDialog,
+    results,
+  };
+
+  // Phone: the segment shows an unread dot for the side that is hidden.
+  const latest = (talkSeat ? threadData?.messages : broadcast)?.slice(-1)[0];
+  const latestKey = latest ? `${latest.id}|${latest.at}` : "";
+  const latestOther = !!latest && latest.from.toLowerCase() !== operator.toLowerCase();
+  useEffect(() => {
+    if (tab === "talk") seenTalk.current = latestKey;
+  }, [tab, latestKey]);
+  useEffect(() => {
+    if (tab === "board" && needsData) seenNeeds.current = needsData.count;
+  }, [tab, needsData]);
+  const talkDot = tab === "board" && latestOther && seenTalk.current !== latestKey;
+  const boardDot = tab === "talk" && !!needsData && seenNeeds.current >= 0 && needsData.count > seenNeeds.current;
 
   const failedReads = [
     board.error ? "board" : "",
     plan.error ? "plan" : "",
-    lead.error ? "lead" : "",
-    thread.error ? "thread" : "",
     needsYou.error ? "needs you" : "",
-    ticket.error ? "ticket" : "",
+    talkSeat && thread.error ? "thread" : "",
+    panel && panelTicket.error ? "ticket" : "",
   ].filter(Boolean);
-
-  const seats = Array.isArray(boardData?.agents) ? boardData.agents : null;
-  const runGroups = Array.isArray(boardData?.agent_map?.groups) ? boardData.agent_map.groups : null;
-  const knownTickets = useMemo(
-    () => ticketIdsOf(Array.isArray(planData?.nodes) ? planData.nodes : []),
-    [planData],
-  );
-  const operator = session.data?.operator ?? lead.data?.operator ?? "";
-  const operatorNote = session.data?.operator_note ?? lead.data?.operator_note ?? "";
 
   if (api.origin.refused) {
     return (
@@ -217,145 +280,286 @@ export function App({ api: injected }: { api?: AtmanApi } = {}) {
       </main>
     );
   }
-
   if (session.error) {
     return (
       <main className="boot">
         <h1>atman</h1>
         <Failure what="The session" error={session.error} />
-        <p>
-          Nothing below this would be real, so nothing is drawn. Start the board server, then reload. From a dev
-          server it also has to be told this origin:
-        </p>
+        <p>Nothing below this would be real, so nothing is drawn. Start the board server, then reload. From a dev server it also has to be told this origin:</p>
         <Command cmd="atm ui --dev-origin http://localhost:5173" />
         <p className="muted">Reading {api.origin.api || "(no API base)"}.</p>
       </main>
     );
   }
 
-  const centre =
-    view === "needs-you" ? (
-      <NeedsYouPane data={needsYouData} error={stale(needsYouData, needsYou.error)} onTicket={openTicket} />
-    ) : view === "fleet" ? (
-      <FleetPane board={boardData} error={stale(boardData, board.error, !!board.data)} project={project} />
-    ) : view === "runs" ? (
-      <RunsPane board={boardData} error={stale(boardData, board.error, !!board.data)} project={project} onTicket={openTicket} />
+  const objective = (planData?.objective || {}) as Record<string, unknown>;
+  const objText = String(objective.text || "").trim();
+  const objExit = String(objective.exit_criterion || "").trim();
+  const objClosed = String(objective.state || "") === "closed";
+  const progress = planData ? progressOf(planData) : null;
+  const strip = planData ? stripOf(planData, needsData?.count ?? 0) : null;
+  const groups = groupNodes(nodesList);
+  const items: NeedsYouItem[] | null = needsData ? needsData.items : needsYou.error ? null : [];
+  const boardEmpty = !!planData && planData.available && nodesList.length === 0;
+  const projectRows = Array.isArray(projects.data?.projects) ? projects.data.projects : [];
+  const youLine = (testId?: string) =>
+    operator ? (
+      <>
+        You are <b>{operator}</b>
+      </>
     ) : (
-      <PlanPane
-        plan={planData}
-        error={stale(planData, plan.error, !!plan.data)}
-        project={project}
-        selected={selected}
-        onSelect={openTicket}
-      />
+      <span className="readonly" data-testid={testId}>
+        Read-only. Start with <code>atm ui --operator &lt;name&gt;</code> to act.
+        {operatorNote ? <span className="sr-only"> {operatorNote}</span> : null}
+      </span>
     );
+  const currentProject = projectRows.find((p) => p.slug === project);
+  const workload = currentProject ? projectWorkloadLine(currentProject.counts) : null;
+
+  const dialogNode = dialog && "id" in dialog && dialog.id ? nodes.get(dialog.id) || null : null;
 
   return (
-    <div className={`shell${selected ? " shell-drilled" : ""}`} data-view={view}>
-      <Sidebar
-        projects={projects.data}
-        projectsError={projects.error}
-        project={project}
-        onProject={(slug) => {
-          setProject(slug);
-          goTo(view, "");
-        }}
-        view={view}
-        onView={goView}
-        needsYouCount={typeof needsYou.data?.count === "number" ? needsYou.data.count : null}
-        seatCount={seats ? seats.length : null}
-        runningCount={runGroups ? runGroups.reduce((n, g) => n + (Number(g?.running) || 0), 0) : null}
-        clock={clock}
-      />
+    <div className={`app${details ? " show-details" : ""}`} data-testid="app">
+      <header className="top">
+        <span className="wordmark">atman</span>
+        <span className="project" title="Project switcher: every board in ~/.config/atman/board.json">
+          <label className="sr-only" htmlFor="project-switch">
+            Project
+          </label>
+          <select
+            id="project-switch"
+            value={project}
+            onChange={(e) => {
+              setProject(e.target.value);
+              setPanel("");
+              setRecipient(null);
+              setAbout(null);
+              setResults(new Map());
+              setOlder({ key: "", posts: [] });
+            }}
+            data-testid="project-switch"
+          >
+            {projectRows.length ? null : <option value={project}>{project || "…"}</option>}
+            {projectRows.map((p) => {
+              const line = projectWorkloadLine(p.counts);
+              return (
+                <option key={p.slug} value={p.slug} title={line || undefined}>
+                  {p.slug}
+                  {p.lead ? ` · lead ${p.lead}` : ""}
+                </option>
+              );
+            })}
+          </select>
+          <span className="chev" aria-hidden="true">
+            ▾
+          </span>
+        </span>
+        {workload ? (
+          <span className="project-count muted" data-testid="project-count" title="this board's workload, by the plan's words">
+            {workload}
+          </span>
+        ) : null}
+        {projects.error && !projects.data ? <span className="missing">projects unreadable</span> : null}
+        <span className="spacer" />
+        <span className="you" data-testid="you">
+          {youLine("read-only")}
+        </span>
+        <button type="button" className="switch" role="switch" aria-checked={details} onClick={() => setDetails((d) => !d)} title="Show paths, transcripts, receipts, limits and phases">
+          <i aria-hidden="true" />
+          <span>{details ? "Details on" : "Details"}</span>
+        </button>
+      </header>
 
-      <div className="topbar">
-        <div className="topbar-who">
-          {operator ? (
-            <span>
-              you are <b>{operator}</b> (operator)
-            </span>
-          ) : (
-            <span className="missing" data-testid="read-only">
-              read-only: no operator configured
-            </span>
-          )}
-          {operator ? null : <span className="muted"> · {operatorNote}</span>}
-        </div>
-        <div className="topbar-fresh muted" data-testid="freshness">
-          {board.readAt ? `board read ${ago(board.readAt.toISOString())}` : "reading the board…"}
-          {failedReads.length ? (
-            <span className="missing"> · last read failed: {failedReads.join(", ")}</span>
+      <div className="objective" data-testid="objective">
+        <div className="row">
+          <div className="grow">
+            {!planData && plan.error ? (
+              <Failure what="The plan" error={plan.error} />
+            ) : !planData ? (
+              <h1 className="quiet">Reading the board…</h1>
+            ) : !objText ? (
+              <>
+                <h1 className="quiet">No objective yet. Say what this board is for.</h1>
+                <div className="actions">
+                  <ActionButton v={{ label: "Set objective…", onClick: () => setDialog({ kind: "objective" }), kind: "" }} readOnly={readOnly} />
+                </div>
+              </>
+            ) : (
+              <>
+                <h1>{objText}</h1>
+                {objClosed ? (
+                  <p className="when">Objective closed{objective.closed_at ? ` ${ago(String(objective.closed_at))}` : ""}.</p>
+                ) : objExit ? (
+                  <p className="when">Done when {objExit}</p>
+                ) : (
+                  <p className="when warn">
+                    No "done when" set yet.
+                    <span className="details inline muted">
+                      {" "}
+                      · <code>atm objective --exit "…"</code>
+                    </span>
+                  </p>
+                )}
+              </>
+            )}
+            <p className="you-mobile">{youLine()}</p>
+          </div>
+          {progress && objText ? (
+            <div className="progress" data-testid="progress">
+              <span className="n">
+                {progress.accepted} of {progress.total} accepted
+              </span>
+              {progress.unaccepted ? <span className="muted"> · {progress.unaccepted} done, not accepted</span> : null}
+              <div className="bar" aria-hidden="true">
+                <i style={{ width: `${progress.total ? Math.round((100 * progress.accepted) / progress.total) : 0}%` }} />
+              </div>
+            </div>
           ) : null}
-        </div>
-        <div className="tabs" role="tablist" aria-label="Panes">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "chat"}
-            className={tab === "chat" ? "tab tab-on" : "tab"}
-            onClick={() => setTab("chat")}
-          >
-            Chat
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === "centre"}
-            className={tab === "centre" ? "tab tab-on" : "tab"}
-            onClick={() => setTab("centre")}
-          >
-            {view === "lead" ? "Plan" : view.replace("-", " ")}
-          </button>
         </div>
       </div>
 
-      <main className="cols" data-tab={tab}>
-        <div className="col col-chat">
-          <Boundary what="The chat">
-            <LeadPane
-              api={api}
-              project={project}
-              lead={leadData}
-              leadError={stale(leadData, lead.error, !!lead.data)}
-              thread={threadData}
-              threadError={stale(threadData, thread.error, !!thread.data)}
-              knownTickets={knownTickets}
-              onTicket={openTicket}
-              onReload={() => {
-                thread.reload();
-                lead.reload();
-              }}
-            />
-          </Boundary>
+      <div className="layout" data-tab={tab}>
+        <div className="seg" role="tablist" aria-label="Board or Talk">
+          <button type="button" role="tab" aria-selected={tab === "board"} aria-pressed={tab === "board"} onClick={() => setTab("board")}>
+            Board{boardDot ? <span className="unread" aria-label="new needs-you item" /> : null}
+          </button>
+          <button type="button" role="tab" aria-selected={tab === "talk"} aria-pressed={tab === "talk"} onClick={() => setTab("talk")}>
+            Talk{talkDot ? <span className="unread" aria-label="new message" /> : null}
+          </button>
         </div>
-        <div className="col col-centre">
-          <Boundary what="This view">{centre}</Boundary>
-        </div>
-        {selected ? (
-          <div className="col col-detail">
-            <Boundary what="The ticket detail">
-              <TicketPane
-                ticket={ticketData}
-                // Whatever is open must be this ticket or an error: leaving the
-                // previous ticket's evidence under a new id in the URL would
-                // attribute one piece of work's runs, review and accept to
-                // another.
-                error={
-                  ticketData
-                    ? null
-                    : ticket.error ||
-                      (ticket.data && !ticket.loading
-                        ? new Error(`that read answered for ${ticket.data.id}, not ${selected}`)
-                        : null)
-                }
-                loading={ticket.loading}
-                onClose={() => goTo(view, "")}
-                onTicket={openTicket}
+
+        <main className="main" aria-label="Board">
+          <nav className="strip" aria-label="Now" data-testid="strip">
+            {strip ? (
+              (
+                [
+                  ["working", strip.working, "working"],
+                  ["needs", strip.needs, "needs you"],
+                  ["blocked", strip.blocked, "blocked"],
+                  ["done", strip.done, "done"],
+                ] as Array<[string, number, string]>
+              ).map(([k, n, label]) => (
+                <a key={k} className={`pill ${k}${n ? "" : " zero"}${k === "needs" && n ? " hot" : ""}`} href={`#sec-${k}`} onClick={(e) => { e.preventDefault(); document.getElementById(`sec-${k}`)?.scrollIntoView({ block: "start" }); }} data-testid={`pill-${k}`}>
+                  <i aria-hidden="true" />
+                  {n} {label}
+                  {k === "done" && strip.unaccepted ? <span className="muted"> · {strip.unaccepted} not accepted</span> : null}
+                </a>
+              ))
+            ) : (
+              <span className="pill unavailable" data-testid="pill-unavailable">
+                <i aria-hidden="true" />
+                Board unavailable
+              </span>
+            )}
+          </nav>
+          <PresenceStrip agents={agents} nodes={nodesList} operator={operator} details={details} onTalk={(seat) => message(seat, "")} />
+          <p className="fresh muted" data-testid="freshness">
+            <span className="details inline">
+              {board.readAt ? `Board read ${ago(board.readAt.toISOString(), now)}` : "reading the board…"}
+              {boardData?.generated ? ` · plan generated ${boardData.generated}` : ""}
+              {projectRows.find((p) => p.slug === project)?.board ? ` · ${projectRows.find((p) => p.slug === project)!.board}` : ""}
+              {operator ? ` · operator ${operator}` : " · no operator"}
+            </span>
+            {failedReads.length ? <span className="missing"> · last read failed: {failedReads.join(", ")}</span> : null}
+            {!planData && !plan.error ? <span className="details inline"> · reading the plan…</span> : null}
+          </p>
+
+          {planData && !planData.available ? (
+            <Failure what="The plan" error={new Error("the board's Work payload could not be built; nothing is drawn in its place")} />
+          ) : null}
+          {boardEmpty ? (
+            <div className="empty" data-testid="board-empty">
+              <span className="grow">
+                This board has no tickets. Add work with <code>atm plan</code> or <code>atm create</code>.
+              </span>
+              <ActionButton v={{ label: "Create ticket…", onClick: () => setDialog({ kind: "create" }), kind: "" }} readOnly={readOnly} />
+            </div>
+          ) : planData ? (
+            <Boundary what="The sections">
+              <NeedsYouSection items={items} reviews={groups.needs} filter={filter} onFilter={setFilter} s={screen} />
+              <WorkingSection nodes={groups.working} s={screen} />
+              <BlockedSection nodes={groups.blocked} s={screen} />
+              <UpNextSection nodes={groups.next} s={screen} />
+              <DoneSection
+                nodes={groups.done}
+                s={screen}
+                open={doneOpen}
+                onToggle={() => {
+                  setDoneOpen((o) => {
+                    storeSet(DONE_OPEN_KEY, !o);
+                    return !o;
+                  });
+                }}
               />
             </Boundary>
-          </div>
-        ) : null}
-      </main>
+          ) : !plan.error ? (
+            <p className="muted">Reading the plan…</p>
+          ) : null}
+        </main>
+
+        <Boundary what="Talk">
+          <Talk
+            s={screen}
+            recipient={talkWith}
+            onRecipient={(seat) => {
+              setRecipient(seat);
+              setAbout(null);
+              setOlder({ key: "", posts: [] });
+            }}
+            lead={lead}
+            onSetLead={setLead}
+            thread={threadData}
+            threadError={thread.error}
+            broadcast={broadcast}
+            olderPages={older.key === `${project}|${talkSeat}` ? older.posts : []}
+            onLoadOlder={(before) => {
+              void api.thread({ project: on, with: talkSeat, before }).then((page) => {
+                setOlder((prev) => ({ key: `${project}|${talkSeat}`, posts: [...page.messages, ...(prev.key === `${project}|${talkSeat}` ? prev.posts : [])] }));
+              });
+            }}
+            composer={{
+              about: aboutId,
+              onAbout: (id) => setAbout(id),
+              send: (text) => send(talkWith, aboutId, text),
+              focusToken,
+            }}
+          />
+        </Boundary>
+      </div>
+
+      {panel ? (
+        <Boundary what="The ticket panel">
+          <TicketPanel
+            id={panel}
+            node={nodes.get(panel) || null}
+            ticket={ticketData}
+            ticketError={ticketData ? null : panelTicket.error || (panelTicket.data && !panelTicket.loading ? new Error(`that read answered for ${panelTicket.data.id}, not ${panel}`) : null)}
+            loading={panelTicket.loading}
+            about={aboutData}
+            aboutError={panelThread.error}
+            s={screen}
+            composer={{
+              send: (text) => {
+                const owner = (ticketData?.owner || nodes.get(panel)?.owner || "").trim();
+                const to = owner && owner.toLowerCase() !== operator.toLowerCase() ? owner : "everyone";
+                return send(to, panel, text);
+              },
+            }}
+            onClose={close}
+          />
+        </Boundary>
+      ) : null}
+
+      {dialog?.kind === "accept" && dialogNode ? (
+        <AcceptDialog node={dialogNode} s={screen} liveHead={headOf(nodes.get(dialogNode.id)).toLowerCase()} checkHead={checkHead(dialogNode.id)} submit={(head, notes) => doAccept(dialogNode.id, head, notes)} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog?.kind === "reject" && dialogNode ? (
+        <RejectDialog node={dialogNode} s={screen} liveHead={headOf(nodes.get(dialogNode.id)).toLowerCase()} checkHead={checkHead(dialogNode.id)} submit={(head, reason) => doReject(dialogNode.id, head, reason)} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog?.kind === "assign" ? <AssignDialog id={dialog.id} s={screen} candidates={assignable(nodesList)} submit={doAssign} onClose={() => setDialog(null)} /> : null}
+      {dialog?.kind === "start" ? <StartSheet s={screen} seat={dialog.seat} onClose={() => setDialog(null)} /> : null}
+      {dialog?.kind === "objective" || dialog?.kind === "create" ? <CommandSheet kind={dialog.kind} onClose={() => setDialog(null)} /> : null}
+      {phone() && panel ? null : null}
     </div>
   );
 }

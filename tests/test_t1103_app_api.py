@@ -346,7 +346,8 @@ def test_schemas_are_valid_and_documented():
     names = sorted(p.name for p in SCHEMAS.glob("*.json"))
     assert names == sorted(["common.json", "error.json", "session.json", "projects.json", "board.json",
                             "plan.json", "thread.json", "lead.json", "needs-you.json", "ticket.json",
-                            "lead-request.json", "lead-response.json"])
+                            "lead-request.json", "lead-response.json",
+                            "verdict-request.json", "assign-request.json", "action-response.json"])
     for n in names:
         schema = json.loads((SCHEMAS / n).read_text())
         js.Draft202012Validator.check_schema(schema)
@@ -354,7 +355,9 @@ def test_schemas_are_valid_and_documented():
         assert n in doc, n
     for route in ("GET /api/v1/session", "GET /api/v1/projects", "GET /api/v1/board", "GET /api/v1/plan",
                   "GET /api/v1/thread", "GET /api/v1/ticket/{id}", "GET /api/v1/lead",
-                  "GET /api/v1/needs-you", "POST /api/v1/lead", "OPTIONS /api/v1/*", "GET /app/"):
+                  "GET /api/v1/needs-you", "POST /api/v1/lead", "POST /api/v1/ticket/{id}/accept",
+                  "POST /api/v1/ticket/{id}/reject", "POST /api/v1/ticket/{id}/assign",
+                  "OPTIONS /api/v1/*", "GET /app/"):
         assert route in doc, route
 
 

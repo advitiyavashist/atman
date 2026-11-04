@@ -385,7 +385,9 @@ def test_entry_points_call_shared_dep_released():
         "cmd_claim": ("_refuse_unreleased_deps",),
         "cmd_status": ("_refuse_unreleased_deps",),
         "cmd_review": ("_refuse_unreleased_deps",),
-        "cmd_assign": ("_refuse_unreleased_deps",),
+        # tickets.py: cmd_assign delegates to assign_ticket (T-1486, shared with the
+        # app API); that body is checked below. cli.py still carries the gate inline.
+        "cmd_assign": ("_refuse_unreleased_deps", "assign_ticket"),
         "cmd_reopen": ("_refuse_unreleased_deps",),
         "cmd_reserve": ("_refuse_unreleased_deps",),
         "cmd_next": ("unblocked", "try_claim"),
@@ -405,6 +407,11 @@ def test_entry_points_call_shared_dep_released():
             body = src[start:nxt if nxt != -1 else None]
             assert any(n in body for n in needles), (
                 "%s %s does not call shared gate %s" % (path.name, fn, needles))
+        start = src.find("def assign_ticket(")
+        if start != -1:
+            nxt = src.find("\ndef ", start + 4)
+            assert "_refuse_unreleased_deps" in src[start:nxt if nxt != -1 else None], (
+                "%s assign_ticket does not call shared gate _refuse_unreleased_deps" % path.name)
         if path.name == "tickets.py":
             start = src.find("def cmd_dispatch(")
             assert start != -1
