@@ -5,6 +5,13 @@ import { beforeEach } from "vitest";
 // location across the tests in a file. Each test starts from the default view.
 beforeEach(() => {
   if (typeof window !== "undefined" && window.location.hash) window.location.hash = "";
+  // Drafts, the Done fold and the panel width live in localStorage; one test's
+  // choices must not become the next test's starting state.
+  try {
+    window.localStorage.clear();
+  } catch {
+    /* no storage in this environment */
+  }
 });
 
 // jsdom has no clipboard. The copy buttons are real controls in these tests,

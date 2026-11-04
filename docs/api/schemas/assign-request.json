@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/assign-request.json",
+  "title": "POST /api/v1/ticket/{id}/assign (request body)",
+  "description": "Hard-assign a ticket to a registered seat, as atm assign --owner does: claims on the seat's behalf, or reserves it when the seat already holds active work. The app never picks the seat.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "owner"
+  ],
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "notes": {
+      "type": "string"
+    },
+    "project": {
+      "type": "string"
+    }
+  }
+}

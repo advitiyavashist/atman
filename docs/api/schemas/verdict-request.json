@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/verdict-request.json",
+  "title": "POST /api/v1/ticket/{id}/accept and /reject (request body)",
+  "description": "An accept needs the full 40-character submitted review head and notes; a reject needs the sha and a reason. Operator only; the server gate is review_verdict.refuse, the same as atm accept / atm reject: the author can never accept their own work, and the sha must be the submitted head.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sha"
+  ],
+  "properties": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{7,40}$"
+    },
+    "notes": {
+      "type": "string",
+      "description": "accept: why this artifact is accepted (required by the gate)"
+    },
+    "reason": {
+      "type": "string",
+      "description": "reject: what is wrong (required by the gate)"
+    },
+    "project": {
+      "type": "string"
+    }
+  }
+}

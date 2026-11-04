@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.atman.invalid/app-v2/action-response.json",
+  "title": "POST /api/v1/ticket/{id}/{accept,reject,assign} (200 response)",
+  "description": "What was recorded, not what was asked: by and sha come from the review event the gate wrote (accept, reject) or from the ticket after the change (assign). The app's result line is built from these fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ok",
+    "action",
+    "ticket",
+    "project",
+    "by",
+    "sha",
+    "at",
+    "status",
+    "status_label",
+    "owner",
+    "returned_to",
+    "changed",
+    "released",
+    "started"
+  ],
+  "properties": {
+    "ok": {
+      "const": true
+    },
+    "action": {
+      "enum": [
+        "accept",
+        "reject",
+        "assign"
+      ]
+    },
+    "ticket": {
+      "$ref": "common.json#/$defs/ticket_id"
+    },
+    "project": {
+      "$ref": "common.json#/$defs/slug"
+    },
+    "by": {
+      "type": "string",
+      "description": "The operator the verdict or assignment was recorded by."
+    },
+    "sha": {
+      "type": "string",
+      "description": "The sha the verdict bound to; \"\" for assign."
+    },
+    "at": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "status_label": {
+      "type": "string"
+    },
+    "owner": {
+      "type": "string",
+      "description": "The ticket's owner after the action."
+    },
+    "returned_to": {
+      "type": "string",
+      "description": "reject: the author the ticket went back to as claimed."
+    },
+    "changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "assign: the CLI's own change list."
+    },
+    "released": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/ticket_id"
+      },
+      "description": "accept: dependants this accept unblocked."
+    },
+    "started": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/ticket_id"
+      }
+    }
+  }
+}
