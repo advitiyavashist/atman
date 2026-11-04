@@ -16188,11 +16188,18 @@ def _service_reconcile_once(home=None, boards=None):
     ss = _seat_service()
     home_root = home if home is not None else os.path.expanduser("~")
     targets = boards if boards is not None else ss.load_boards(home_root)
-    report = {"boards": 0, "started": [], "stopped": [], "skipped": [], "errors": []}
+    report = {"boards": 0, "started": [], "stopped": [], "skipped": [], "errors": [],
+              "health": []}
     for board in targets:
         if not os.path.isdir(board):
             continue
         report["boards"] += 1
+        # T-1512: a board under ~/Downloads blocks a launchd agent in opendir()
+        # until macOS privacy consent; probe with a timeout and skip it.
+        health = ss.probe_board(board)
+        report["health"].append(health)
+        if health["state"] != "ok":
+            continue
         for owner, desired in ss.list_desired_seats(board):
             try:
                 live = _live_watch_pids(owner, board=board)
@@ -16218,6 +16225,35 @@ def _service_reconcile_once(home=None, boards=None):
             except Exception as exc:
                 report["errors"].append("%s:%s:%s" % (board, owner, exc))
     return report
+
+
+def _service_report_log_lines(report, last):
+    """Daemon log lines for one reconcile pass (T-1512).
+
+    Every start, stop and error is logged. Board health and per-seat skip
+    reasons are logged when they change (and on the first pass), so a seat
+    that stays already-live does not write a line every few seconds. *last*
+    is the caller's memory across passes and is updated in place.
+    """
+    ss = _seat_service()
+    lines = []
+    for rec in report.get("health") or []:
+        key = ("board", rec["board"])
+        if last.get(key) != rec["state"]:
+            lines.append(ss.describe_board_health(rec))
+            last[key] = rec["state"]
+    lines += ["started %s" % x for x in report.get("started") or []]
+    lines += ["stopped %s" % x for x in report.get("stopped") or []]
+    lines += ["error %s" % x for x in report.get("errors") or []]
+    for item in report.get("skipped") or []:
+        seat, _, reason = item.rpartition(":")
+        key = ("seat", seat)
+        if last.get(key) != reason:
+            lines.append("skip %s" % item)
+            last[key] = reason
+    for item in report.get("started") or []:
+        last[("seat", item.rsplit(":pid=", 1)[0])] = "started"
+    return lines
 
 
 def _spawn_stop(board, owner, all_boards=False):
@@ -16604,6 +16640,7 @@ def cmd_spawn(a, board):
 
 def cmd_service(a, board=None):
     """Per-user OS service that owns persistent seat watchers (T-1499)."""
+    import time as _time
     ss = _seat_service()
     home = os.environ.get("ATMAN_SERVICE_HOME") or os.path.expanduser("~")
     # Tests redirect the service home via ATMAN_SERVICE_HOME as the fake $HOME root.
@@ -16621,6 +16658,14 @@ def cmd_service(a, board=None):
         print("login-shell env captured at %s" % ss.env_snapshot_path(home))
         print("reconcile interval %ss; spawn --persist records desired=active"
               % ss.RECONCILE_INTERVAL_SECS)
+        boards = list(ss.load_boards(home))
+        if board and os.path.realpath(board) not in boards:
+            boards.append(os.path.realpath(board))
+        guarded = [b for b in boards if ss.tcc_protected_folder(b)]
+        if guarded:
+            print()
+            for line in ss.tcc_grant_instructions(py, guarded):
+                print(line)
         return
 
     if action == "uninstall":
@@ -16635,13 +16680,43 @@ def cmd_service(a, board=None):
         print("installed: %s" % ("yes" if ss.service_installed(home) else "no"))
         print("home: %s" % ss.service_home(home))
         print("boards: %d" % len(boards))
+        daemon = ss.load_board_health(home) or {}
+        daemon_boards = {r.get("board"): r for r in daemon.get("boards") or []
+                         if isinstance(r, dict)}
+        age = None
+        try:
+            age = max(0, int(_time.time() - float(daemon.get("written_at"))))
+        except (TypeError, ValueError):
+            pass
+        if age is None:
+            print("daemon: no reconcile recorded yet")
+        elif age > ss.HEALTH_STALE_SECS:
+            print("daemon: last reconcile %ds ago (pid %s) -- hung or not running"
+                  % (age, daemon.get("pid")))
+        else:
+            print("daemon: last reconcile %ds ago (pid %s)" % (age, daemon.get("pid")))
+        guarded = []
         for b in boards:
             print("  %s" % b)
+            seen = daemon_boards.get(b)
+            if seen and seen.get("state") != "ok":
+                print("    daemon: %s" % ss.describe_board_health(seen))
+                if seen.get("protected"):
+                    guarded.append(b)
+            health = ss.probe_board(b)
+            if health["state"] != "ok":
+                print("    here: %s" % ss.describe_board_health(health))
+                if health.get("protected") and b not in guarded:
+                    guarded.append(b)
+                continue
             for owner, desired in ss.list_desired_seats(b):
                 live = _live_watch_pids(owner, board=b) if os.path.isdir(b) else []
                 print("    %s desired=%s live=%d may_spawn=%s" % (
                     owner, desired.get("state"), len(live),
                     ss.seat_may_spawn(desired, len(live))))
+        if guarded:
+            for line in ss.tcc_grant_instructions(py, guarded):
+                print(line)
         return
 
     if action == "reconcile":
@@ -16655,19 +16730,25 @@ def cmd_service(a, board=None):
             print("stopped %s" % line)
         for line in report["errors"]:
             print("error %s" % line)
+        for rec in report["health"]:
+            if rec["state"] != "ok":
+                print(ss.describe_board_health(rec))
         return
 
     if action == "run":
-        import time as _time
         # Capture/refresh login env once at boot (launchd bare PATH).
         ss.save_login_env(ss.capture_login_env(), home=home)
         print("seat service running; reconcile every %ss; home=%s"
               % (ss.RECONCILE_INTERVAL_SECS, ss.service_home(home)), flush=True)
+        last = {}
         while True:
             try:
-                _service_reconcile_once(home=home)
+                report = _service_reconcile_once(home=home)
+                ss.save_board_health(report["health"], home=home)
+                for line in _service_report_log_lines(report, last):
+                    print("%s %s" % (ss._utc_now(), line), flush=True)
             except Exception as exc:
-                print("reconcile error: %s" % exc, flush=True)
+                print("%s reconcile error: %s" % (ss._utc_now(), exc), flush=True)
             _time.sleep(ss.RECONCILE_INTERVAL_SECS)
 
     sys.exit("unknown service action: %s" % action)

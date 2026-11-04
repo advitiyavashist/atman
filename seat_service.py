@@ -13,6 +13,7 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -24,6 +25,14 @@ BACKOFF_CAP_SECS = 30
 DEFAULT_BACKOFF_SECS = BACKOFF_FLOOR_SECS
 SERVICE_LABEL = "com.atman.seat-service"
 SYSTEMD_UNIT = "atman-seat-service.service"
+# T-1512: macOS privacy (TCC) guards these home folders. A launchd agent that
+# opens a board under one of them blocks in opendir() until the user consents,
+# so every board read goes through a bounded probe first.
+TCC_PROTECTED_FOLDERS = ("Desktop", "Documents", "Downloads",
+                         os.path.join("Library", "Mobile Documents"))
+BOARD_PROBE_TIMEOUT_SECS = 3
+# status calls the daemon silent when its health file is older than this.
+HEALTH_STALE_SECS = 60
 
 # Login-env snapshot: PATH + shell/home/xdg only — never API keys/tokens.
 _LOGIN_ENV_KEYS = frozenset({
@@ -306,6 +315,142 @@ def boards_registry_path(home=None):
 
 def env_snapshot_path(home=None):
     return os.path.join(service_home(_service_home_root(home)), "login-env.json")
+
+def tcc_protected_folder(path, home=None, system=None):
+    """The ~/Downloads-style folder macOS privacy guards *path* under, or None.
+
+    String-only on purpose: resolving the path would itself touch the
+    protected folder and could block the caller.
+    """
+    if (system or platform.system()) != "Darwin":
+        return None
+    home_root = os.path.normpath(home or os.path.expanduser("~"))
+    p = os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+    for name in TCC_PROTECTED_FOLDERS:
+        root = os.path.join(home_root, name)
+        if p == root or p.startswith(root + os.sep):
+            return root
+    return None
+
+
+# board -> {"thread", "result", "since"}; a probe stuck in opendir() stays here
+# so the next pass reports it again instead of stacking another stuck thread.
+_PROBES = {}
+_PROBES_LOCK = threading.Lock()
+
+
+def probe_board(board, timeout=BOARD_PROBE_TIMEOUT_SECS, *, home=None,
+                system=None, _listdir=None):
+    """Bounded readability check of a board and its agents/ dir.
+
+    Returns {"board", "state", "detail", "protected", "checked_at"} where state
+    is ok, blocked (still waiting after *timeout*), denied (EPERM/EACCES) or
+    missing. Never blocks the caller longer than *timeout*.
+    """
+    listdir = _listdir or os.listdir
+
+    def read(slot):
+        try:
+            listdir(board)
+            agents = os.path.join(board, "agents")
+            try:
+                listdir(agents)
+            except FileNotFoundError:
+                pass
+            slot["result"] = ("ok", "")
+        except FileNotFoundError as exc:
+            slot["result"] = ("missing", str(exc))
+        except PermissionError as exc:
+            slot["result"] = ("denied", str(exc))
+        except OSError as exc:
+            slot["result"] = ("denied", str(exc))
+
+    with _PROBES_LOCK:
+        slot = _PROBES.get(board)
+        if slot is None or not slot["thread"].is_alive():
+            slot = {"result": None, "since": time.time()}
+            slot["thread"] = threading.Thread(
+                target=read, args=(slot,), daemon=True,
+                name="atm-board-probe")
+            _PROBES[board] = slot
+            slot["thread"].start()
+    slot["thread"].join(timeout)
+    if slot["thread"].is_alive():
+        state, detail = "blocked", "no answer from opendir() for %ds" % int(
+            time.time() - slot["since"])
+    else:
+        state, detail = slot["result"] or ("denied", "probe failed")
+    return {
+        "board": board,
+        "state": state,
+        "detail": detail,
+        "protected": tcc_protected_folder(board, home=home, system=system),
+        "checked_at": _utc_now(),
+    }
+
+
+def describe_board_health(rec):
+    """One line for logs and status, e.g. 'blocked by macOS privacy: <board>'."""
+    state = rec.get("state")
+    board = rec.get("board")
+    if state == "ok":
+        return "board readable: %s" % board
+    if state == "missing":
+        return "board missing: %s" % board
+    if rec.get("protected"):
+        return "blocked by macOS privacy: %s (%s)" % (board, rec.get("detail") or state)
+    return "board unreadable (%s): %s (%s)" % (state, board, rec.get("detail") or "")
+
+
+def tcc_grant_instructions(python_exe, boards):
+    """What to grant so launchd's python can read boards in protected folders."""
+    exe = os.path.realpath(python_exe)
+    folders = sorted({os.path.basename(f) for f in
+                      (tcc_protected_folder(b) for b in boards) if f})
+    lines = [
+        "macOS privacy: the seat service runs from launchd, which needs consent "
+        "to read %s. Until it has it, the service blocks on these boards and "
+        "starts no seats:" % ", ".join("~/" + f for f in folders),
+    ]
+    lines += ["  %s" % b for b in boards]
+    lines += [
+        "Grant it once, to this exact binary:",
+        "  %s" % exe,
+        "  System Settings > Privacy & Security > Full Disk Access > + , then "
+        "Cmd-Shift-G and paste the path above",
+        "  (or, once macOS has prompted for it, Files and Folders > python3 > %s)"
+        % " / ".join(folders),
+        "Then `atm service status` should report each board readable.",
+    ]
+    return lines
+
+
+def board_health_path(home=None):
+    return os.path.join(service_home(_service_home_root(home)), "board-health.json")
+
+
+def save_board_health(records, home=None):
+    """Daemon-side: last probe of every board, so `service status` can show it."""
+    home_root = _service_home_root(home)
+    os.makedirs(service_home(home_root), exist_ok=True)
+    path = board_health_path(home_root)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"pid": os.getpid(), "written_at": time.time(),
+                   "boards": list(records)}, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def load_board_health(home=None):
+    try:
+        with open(board_health_path(home)) as f:
+            data = json.load(f)
+    except (IOError, OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
 
 def list_desired_seats(board):
     """Yield (owner, desired_rec) for every agents/<owner>.desired file."""

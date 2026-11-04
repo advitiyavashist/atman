@@ -243,6 +243,24 @@ not a native wake. Codex may stop waking after one run; restart the
 watcher. A custom harness is any command whose template names
 `{prompt_file}` ([Bring your own agent](docs/byoa.md)).
 
+### Seat service
+
+`atm spawn NAME --persist` records the seat as desired-active on the board.
+`atm service install` adds one per-user launchd (macOS) or systemd `--user`
+(Linux) service that restarts any active seat whose watcher died.
+`atm service status` lists the boards, each seat's desired and live state, and
+how long ago the daemon last reconciled. `atm service uninstall` removes the
+service.
+
+On macOS a launchd service needs privacy consent to read `~/Downloads`,
+`~/Documents`, `~/Desktop` or iCloud Drive. If a board lives under one of these
+folders, `atm service install` prints the exact python binary to grant:
+System Settings > Privacy & Security > Full Disk Access > +, then Cmd-Shift-G
+and paste that path. Until you grant it, the daemon logs
+`blocked by macOS privacy: <board>` to `~/.atman/service/seat-service.log`,
+starts no seats on that board, and `atm service status` shows the board as
+blocked.
+
 ## Links
 
 [GitHub issues](https://github.com/advitiyavashist/atman/issues)
