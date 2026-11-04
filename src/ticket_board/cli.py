@@ -75,6 +75,19 @@ def _worktree_gc():
         return m
 
 
+def _stuck_gate():
+    """T-014 stuck rounds/escalation (shared with root tickets.py)."""
+    try:
+        from . import stuck_gate as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import stuck_gate as m
+        return m
+
+
 def _gc_hooks():
     return _worktree_gc().CliHooks(_GCApi())
 
@@ -3173,6 +3186,8 @@ def cmd_status(a, board):
         a.__dict__.setdefault("id", a.id)
         cmd_reopen(a, board)
         return
+    if a.status.lower() == "stuck":
+        sys.exit(_stuck_gate().status_word_refusal(a.id))
     if target == "blocked":
         if not a.notes:
             sys.exit("blocked needs --notes \"why\"")
@@ -3285,6 +3300,28 @@ def cmd_block(a, board):
                state_before=before, state_after="blocked",
                outcome="blocked", notes_len=len(a.reason or ""), **_traj_git())
     print("%s blocked: %s" % (a.id, a.reason))
+
+
+def cmd_stuck(a, board):
+    """T-014: one round of 'stuck', or --ack/--resolve. Same logic as
+    tickets.py: both copies call stuck_gate.apply, so they cannot drift."""
+    from contextlib import nullcontext
+    stuck_gate = _stuck_gate()
+    who = whoami(getattr(a, "by", None))
+    a.master = current_master(board) or {}
+    a.aliases = load_aliases(board)
+    tc = _recovery()
+    with (tc.ticket_mutation_lock(board, a.id) if tc else nullcontext()):
+        t = load(board, a.id)
+        try:
+            res = stuck_gate.apply(t, who, a, datetime.now(timezone.utc))
+        except stuck_gate.Refused as e:
+            sys.exit("RULE: %s" % e)
+        save(board, t)
+    for to, text, task in res["messages"]:
+        post_message(board, who, text, to=to, re=t["id"], task=task)
+    for line in res["print"]:
+        print(line)
 
 
 def cmd_note(a, board):
@@ -4136,6 +4173,8 @@ def health(board, tickets):
     if loose and load_epics(board):
         out.append(("INFO", "%d open tickets have no epic" % len(loose),
                     "atm assign <id> --epic E-xxx"))
+    # T-014: same rows as tickets.py (shared stuck_gate.health_items).
+    out.extend(_stuck_gate().health_items(tickets, datetime.now(timezone.utc)))
     if not os.path.exists(master_path(board)):
         out.append(("WARN", "no MASTER.md -- nobody can take over cleanly", "atm master init"))
     return out
@@ -6413,6 +6452,18 @@ def main():
     c.add_argument("id")
     c.add_argument("--reason", "-n", required=True)
     c.set_defaults(fn=cmd_block)
+
+    c = sub.add_parser("stuck", help="report one round of being stuck (escalates after N rounds); "
+                                     "--ack/--resolve answer an escalation")
+    c.add_argument("id")
+    c.add_argument("--obstacle", "-o", default="",
+                   help="short name for what blocks you; the same words every round")
+    c.add_argument("--evidence", "-e", default="",
+                   help="what you tried THIS round and what it returned")
+    c.add_argument("--ack", action="store_true", help="acknowledge an escalation (not the reporter)")
+    c.add_argument("--resolve", action="store_true", help="close the stuck report; unblocks the ticket")
+    c.add_argument("--notes", "-n", default="", help="required with --ack/--resolve")
+    c.set_defaults(fn=cmd_stuck)
 
     c = sub.add_parser("note", help="add a note to a ticket")
     c.add_argument("id")

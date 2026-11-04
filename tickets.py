@@ -7183,6 +7183,8 @@ def cmd_status(a, board):
         a.__dict__.setdefault("id", a.id)
         cmd_reopen(a, board)
         return
+    if word == "stuck":
+        sys.exit(_stuck_gate().status_word_refusal(a.id))
     if target == "blocked":
         if not a.notes:
             sys.exit("blocked needs --notes \"why\"")
@@ -7379,6 +7381,53 @@ def cmd_block(a, board):
                              outcome="blocked", notes_len=len(a.reason or ""),
                              **_traj_git()), None)
     print("%s blocked: %s" % (a.id, a.reason))
+
+
+def _stuck_gate():
+    try:
+        from ticket_board import stuck_gate as m
+        return m
+    except ImportError:
+        src = os.path.join(os.path.dirname(os.path.realpath(__file__)), "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        from ticket_board import stuck_gate as m
+        return m
+
+
+def cmd_stuck(a, board):
+    """T-014: report a round of 'stuck', or acknowledge/resolve an escalation.
+
+    A seat earns BLOCKED-on-stuck only after the same obstacle survives N
+    consecutive rounds, each with new evidence. Then the planner and CEO are
+    tasked, and the ticket stays on health and the operator view until it is
+    resolved. Prose `stuck:` messages are never counted -- T-976's four went
+    unanswered for six weeks. Logic lives in stuck_gate.apply (shared with
+    the packaged CLI).
+    """
+    from contextlib import nullcontext
+    sg = _stuck_gate()
+    who = whoami(getattr(a, "by", None))
+    a.master = current_master(board) or {}
+    a.aliases = load_aliases(board)
+    tc = _recovery()
+    with (tc.ticket_mutation_lock(board, a.id) if tc else nullcontext()):
+        t = load(board, a.id)
+        try:
+            res = sg.apply(t, who, a, datetime.now(timezone.utc))
+        except sg.Refused as e:
+            sys.exit("RULE: %s" % e)
+        save(board, t)
+    v = res.get("verdict") or {}
+    if v:
+        _safe(lambda: traj_event(board, "block" if v["escalate"] else "update", agent=who,
+                                 ticket=t, state_after=t["status"],
+                                 outcome="escalated" if v["escalate"] else "round",
+                                 notes_len=len(a.evidence or "")), None)
+    for to, text, task in res["messages"]:
+        post_message(board, who, text, to=to, re=t["id"], task=task)
+    for line in res["print"]:
+        print(line)
 
 
 def cmd_note(a, board):
@@ -8469,6 +8518,9 @@ def _health_body(board, tickets):
         elif not refs and not t.get("deps"):
             out.append(("INFO", "%s blocked on something outside the board: %s" % (
                 t["id"], reason[:70]), "create a ticket for the prerequisite with --blocks %s" % t["id"]))
+    # T-014: an escalated stuck stays visible until resolved; unacknowledged
+    # past the SLA it is CRIT, and CRIT wakes the master every watch poll.
+    out.extend(_stuck_gate().health_items(tickets, datetime.now(timezone.utc)))
     owners = {}
     for t in tickets:
         if t["status"] == "claimed":
@@ -13235,7 +13287,9 @@ never edit .tickets/ by hand; never run `atm clear`. Board-only comms: `atm msg`
 STUCK RULE: if anything blocks you -- a permission you cannot get, a failing test you cannot fix,
 an unclear ticket, missing access or a decision that is not yours -- do not wait and do not stop
 silently. Post `atm msg "stuck: <what, what you tried, what you need>" --to {master} --re <id>`,
-then `atm update <id> "stuck: ..."`; if you cannot continue at all, `atm block <id> --reason "..."`.
+then `atm stuck <id> --obstacle "<short name>" --evidence "<what you tried this round>"` -- once
+per round, same obstacle name each time; after N rounds (default 2) it escalates to the planner and CEO
+on its own. If you cannot continue at all, `atm block <id> --reason "..."`.
 The master's job is to unblock you; yours is to say so early.
 Do now, in order:
 1. `atm inbox` -- read and, if anything is addressed to you, answer with `atm msg --to <who>`.
@@ -20836,6 +20890,22 @@ def ui_needs_you(board, operator, project, tickets=None, now_dt=None):
             age = _age_h(m.get("at"))
             if age is not None and age > 1.0:
                 _push(m, "stuck for over an hour")
+    sg = _stuck_gate()
+    tickets = tickets if tickets is not None else load_all(board)
+    for t in tickets:
+        sv = sg.escalation_view(t, now_dt)
+        if not sv:
+            continue
+        why = ("stuck escalation unacknowledged for over %gh" % sv["sla_h"]) if sv["overdue"] \
+            else ("stuck escalation, acknowledged by %s, not resolved" % sv["acked_by"]
+                  if sv["acked_by"] else "stuck escalation awaiting acknowledgement")
+        # kind/label stay inside the needs-you.json contract the app validates.
+        items.append({"kind": "escalated", "why": why, "id": t["id"],
+                      "at": sv["escalated_at"], "from": sv["reporter"],
+                      "author": "%s@%s" % (sv["reporter"] or "?", project), "re": t["id"],
+                      "text": ("stuck on %s after %d rounds: %s" % (
+                          sv["obstacle"], sv["rounds"], sv["evidence"]))[:400],
+                      "state": "asked", "label": "asked (unstructured)"})
     for t in (tickets if tickets is not None else load_all(board)):
         auto = t.get("automated") or {}
         if (t.get("kind") == "automated" and auto.get("escalated")
@@ -24214,6 +24284,18 @@ def main():
     c.add_argument("--reason", "--notes", "-n", dest="reason", required=True,
                     help="why it's blocked (--notes accepted as an alias -- same shape as done/review)")
     c.set_defaults(fn=cmd_block)
+
+    c = sub.add_parser("stuck", help="report one round of being stuck (escalates after N rounds); "
+                                     "--ack/--resolve answer an escalation")
+    c.add_argument("id")
+    c.add_argument("--obstacle", "-o", default="",
+                   help="short name for what blocks you; the same words every round")
+    c.add_argument("--evidence", "-e", default="",
+                   help="what you tried THIS round and what it returned")
+    c.add_argument("--ack", action="store_true", help="acknowledge an escalation (not the reporter)")
+    c.add_argument("--resolve", action="store_true", help="close the stuck report; unblocks the ticket")
+    c.add_argument("--notes", "-n", default="", help="required with --ack/--resolve")
+    c.set_defaults(fn=cmd_stuck)
 
     c = sub.add_parser("note", help="add a note to a ticket")
     c.add_argument("id")
