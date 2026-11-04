@@ -88,7 +88,7 @@ def section_name(raw):
 
 
 def parse(text):
-    """Markdown -> {section: body}. Refuses Goal and unknown `##` headings.
+    """Markdown -> {section: body}. Refuses Goal and unknown top headings.
 
     Text before the first `##` heading (a `#` title line, say) is dropped:
     the title and the Goal are rendered from the ticket, not stored.
@@ -97,9 +97,17 @@ def parse(text):
     for line in (text or "").splitlines():
         m = _HEADING_RE.match(line)
         if m:
+            try:
+                name = section_name(m.group(1))
+            except StateError:
+                if current and m.group(1).strip().casefold() != PROTECTED.casefold():
+                    # Ordinary Markdown subheadings belong to the section.
+                    buf.append(line)
+                    continue
+                raise
             if current:
                 out[current] = "\n".join(buf).strip()
-            current, buf = section_name(m.group(1)), []
+            current, buf = name, []
             continue
         if current:
             buf.append(line)
@@ -216,6 +224,7 @@ def _reconcile(board, seat, ticket, at):
         return hist
     rec = {"v": len(hist) + 1, "at": at, "by": seat, "ticket": tid,
            "how": "direct edit of the .md file (not through atm state)",
+           "owner_generation": ticket.get("owner_generation") or 0,
            "sha256": _digest(body), "body": body, "raw": raw}
     _append(board, seat, tid, rec)
     return hist + [rec]
@@ -235,9 +244,18 @@ def _latest_other(board, seat, ticket_id):
         if not os.path.isdir(os.path.join(root, other)):
             continue
         hist = history(board, other, ticket_id)
-        if hist and (best is None or str(hist[-1].get("at") or "") > str(best[1].get("at") or "")):
+        if hist and (best is None or _checkpoint_key(hist[-1]) > _checkpoint_key(best[1])):
             best = (other, hist[-1])
     return best
+
+
+def _checkpoint_key(rec):
+    """Owner generations order handoffs even when timestamps share a second."""
+    try:
+        generation = int(rec.get("owner_generation") or 0)
+    except (TypeError, ValueError):
+        generation = 0
+    return generation, str(rec.get("at") or ""), int(rec.get("v") or 0)
 
 
 def load(board, seat, ticket, at=""):
@@ -249,12 +267,12 @@ def load(board, seat, ticket, at=""):
     """
     tid = ticket.get("id")
     hist = _reconcile(board, seat, ticket, at)
-    if hist:
+    prev = _latest_other(board, seat, tid)
+    if hist and (not prev or _checkpoint_key(hist[-1]) >= _checkpoint_key(prev[1])):
         last = hist[-1]
         return {"sections": parse(last["body"]), "body": last["body"], "version": last.get("v"),
                 "by": last.get("by") or seat, "at": last.get("at") or "",
                 "path": state_path(board, seat, tid), "inherited_from": ""}
-    prev = _latest_other(board, seat, tid)
     if not prev:
         return None
     other, last = prev
@@ -278,6 +296,8 @@ def write(board, seat, ticket, updates=None, replace_text=None, at=""):
     for raw, text in (updates or {}).items():
         base[section_name(raw)] = str(text or "").strip()
     body = render_body(base)
+    if parse(body) != {name: (base.get(name) or "").strip() for name in SECTIONS}:
+        raise StateError("section text contains a reserved ## heading; use ### for a subheading")
     if len(body) > MAX_BODY_CHARS:
         raise StateError("STATE is %d chars (limit %d): it is a working state, not a log. "
                          "Rewrite sections shorter; the board keeps the full history."
@@ -286,6 +306,7 @@ def write(board, seat, ticket, updates=None, replace_text=None, at=""):
     if hist and hist[-1].get("sha256") == _digest(body):
         return hist[-1], False
     rec = {"v": len(hist) + 1, "at": at, "by": seat, "ticket": tid, "how": "atm state",
+           "owner_generation": ticket.get("owner_generation") or 0,
            "sha256": _digest(body), "body": body}
     if current and current.get("inherited_from"):
         rec["inherited_from"] = "%s@v%s" % (current["inherited_from"], current.get("version"))

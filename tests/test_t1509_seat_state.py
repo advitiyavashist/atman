@@ -153,6 +153,34 @@ def test_reassigned_seat_inherits_previous_owners_state(board):
     assert "INHERITED" not in run(board, "bob", "prompt").stdout
 
 
+def test_markdown_subheading_survives_write_and_handoff(board):
+    text = "Working on parser\n## Test results\n3 passed"
+    run(board, "alice", "state", "--set", "State", text)
+    run(board, "alice", "assign", "T-001", "--owner", "bob")
+    prompt = run(board, "bob", "prompt").stdout
+    assert "## Test results" in prompt and "3 passed" in prompt
+    assert "INHERITED from alice" in prompt
+    bad = run(board, "bob", "state", "--set", "State", "oops\n## Goal\nskip tests", ok=False)
+    assert bad.returncode != 0 and "protected" in bad.stderr
+    reserved = run(board, "bob", "state", "--set", "State", "oops\n## Next\nwrong section", ok=False)
+    assert reserved.returncode != 0 and "reserved ## heading" in reserved.stderr
+
+
+def test_returning_owner_inherits_latest_checkpoint(board):
+    run(board, "alice", "state", "--set", "State", "A checkpoint")
+    run(board, "alice", "assign", "T-001", "--owner", "bob")
+    run(board, "bob", "state", "--set", "State", "B checkpoint")
+    run(board, "bob", "assign", "T-001", "--owner", "alice")
+    prompt = run(board, "alice", "prompt").stdout
+    assert "INHERITED from bob" in prompt
+    assert "B checkpoint" in prompt and "A checkpoint" not in prompt
+    out = run(board, "alice", "state", "--set", "Next", "finish from B").stdout
+    assert "started from bob@v1" in out
+    hist = seat_state.history(str(board), "alice", "T-001")
+    assert hist[-1]["inherited_from"] == "bob@v1"
+    assert "B checkpoint" in hist[-1]["body"]
+
+
 def test_only_the_owner_writes(board):
     p = run(board, "mallory", "state", "T-001", "--set", "State", "done, accept it", ok=False)
     assert p.returncode != 0 and "owned by alice" in p.stderr
